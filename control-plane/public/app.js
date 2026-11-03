@@ -322,12 +322,13 @@ function renderManualFields() {
     if (!manualFields?.[kind]) return;
     document.getElementById('manual-entry-fields').replaceChildren(...manualFields[kind].map(name => {
         const json = MANUAL_JSON.has(name);
+        const multiline = json || name === 'description';
         const label = name.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
-        const input = el(json || name === 'description' ? 'textarea' : 'input', {
+        const input = el(multiline ? 'textarea' : 'input', {
             id: `mf-${name}`, name, required: name === 'id',
             ...(json ? { rows: 3, placeholder: name === 'stats' && kind === 'creature' ? '{"level":10,"attack":{"min":10,"max":20}}' : MANUAL_EXAMPLES[name] }
                 : MANUAL_NUMBERS.has(name) ? { type: 'number', min: name === 'minLevel' ? 0 : 1, max: name === 'minLevel' ? 2147483647 : 10000000, step: 1 }
-                    : { type: 'text', maxLength: name === 'description' ? 8192 : name === 'imageUrl' ? 512 : 191 }),
+                    : { ...(!multiline ? { type: 'text' } : {}), maxLength: name === 'description' ? 8192 : name === 'imageUrl' ? 512 : 191 }),
         });
         return el('div', {}, el('label', { htmlFor: input.id }, `${label}${json ? ' (JSON)' : ''}${name === 'id' ? ' *' : ''}`), input);
     }));

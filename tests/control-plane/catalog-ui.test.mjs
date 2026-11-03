@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { parseHTML } from 'linkedom';
+import { manualRecordFields } from '../../catalog/guideNormalizers.js';
 
 const PUBLIC = path.resolve('control-plane/public');
 const APP = fs.readFileSync(path.join(PUBLIC, 'app.js'), 'utf8');
@@ -44,10 +45,7 @@ function respond(url, init) {
     if (p === '/api/session') return { csrf: 'csrf-token' };
     if (p === '/api/catalog/summary') return SUMMARY;
     if (p === '/api/catalog/guide-scan') return { ok: true };
-    if (p === '/api/catalog/manual-fields') return { kinds: {
-        item: ['id', 'name', 'stats'], creature: ['id', 'name', 'description', 'stats'], realm: ['id', 'name', 'minLevel'],
-        master_realm: ['id', 'name', 'realms'], relic: ['id', 'name', 'realmId', 'sections'], quest: ['id', 'name', 'realmId', 'minLevel', 'sections'],
-    } };
+    if (p === '/api/catalog/manual-fields') return { kinds: manualRecordFields() };
     if (p === '/api/catalog/manual-entries') return { ok: true, key: String(JSON.parse(init.body).record.id) };
     if (p === '/api/catalog/entities') return { kind: u.searchParams.get('kind'), page: 1, pageSize: 25, total: 1, items: [{ key: '7001', id: 7001, name: HOSTILE, catalog: { completeness: 'incomplete', incompleteReasons: ['known_drop_unresolved'], lastSeenAt: '2026-09-28T11:00:00.000Z' } }] };
     if (p === '/api/catalog/entities/creature/7001') {
@@ -64,6 +62,9 @@ function respond(url, init) {
 before(async () => {
     const html = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8').replace(/<script[^>]*><\/script>/, '');
     const dom = parseHTML(html);
+    // Native HTMLTextAreaElement.type is read-only. Linkedom allows assignment, which previously
+    // hid a browser exception when rendering the creature description and left item fields visible.
+    Object.defineProperty(dom.window.HTMLTextAreaElement.prototype, 'type', { configurable: true, get: () => 'textarea', set: undefined });
     const sources = [];
     const location = { assign: url => { location.assigned = url; } };
     const fetch = async (url, init = {}) => {
@@ -93,6 +94,8 @@ test('manual section switches Guide fields, requires only ID and sends optional 
     assert.equal($('#catalog-manual').hidden, false);
     assert.equal($('#mf-id').required, true);
     assert.equal($('#mf-name').required, false);
+    assert.deepEqual([...ui.document.querySelectorAll('#manual-entry-fields [name]')].map(input => input.name), manualRecordFields().item);
+    assert.equal($('#mf-realms'), null);
     $('#mf-id').value = '456';
     $('#manual-entry-form').dispatchEvent(new ui.Event('submit', { cancelable: true }));
     await flush();
@@ -102,8 +105,17 @@ test('manual section switches Guide fields, requires only ID and sends optional 
     [...ui.document.querySelectorAll('#mf-kind option')].find(o => o.value === 'creature').selected = true;
     $('#mf-kind').dispatchEvent(new ui.Event('change'));
     assert.ok($('#mf-description'));
+    assert.deepEqual([...ui.document.querySelectorAll('#manual-entry-fields [name]')].map(input => input.name), manualRecordFields().creature);
+    assert.equal($('#mf-rarity'), null);
+    assert.equal($('#mf-setBonuses'), null);
+    assert.equal($('#mf-droppedBy'), null);
+    assert.ok($('#mf-droppedItems'));
+    assert.ok($('#mf-realms'));
+    assert.equal($('#mf-realms').required, false);
+    assert.deepEqual(JSON.parse($('#mf-realms').placeholder), [{ realmId: 123, realmName: 'Forest' }]);
     $('#mf-id').value = '457';
     $('#mf-name').value = HOSTILE;
+    $('#mf-realms').value = '[{"realmId":1200,"realmName":"Forest"}]';
     $('#mf-stats').value = '{broken';
     const count = requests.filter(r => r.url === '/api/catalog/manual-entries').length;
     $('#manual-entry-form').dispatchEvent(new ui.Event('submit', { cancelable: true }));
@@ -114,8 +126,14 @@ test('manual section switches Guide fields, requires only ID and sends optional 
     $('#manual-entry-form').dispatchEvent(new ui.Event('submit', { cancelable: true }));
     await flush();
     sent = requests.filter(r => r.url === '/api/catalog/manual-entries').at(-1);
-    assert.deepEqual(JSON.parse(sent.body), { kind: 'creature', record: { id: 457, name: HOSTILE, stats: { level: 10 } } });
+    assert.deepEqual(JSON.parse(sent.body), { kind: 'creature', record: { id: 457, name: HOSTILE, stats: { level: 10 }, realms: [{ realmId: 1200, realmName: 'Forest' }] } });
     assert.equal($('#manual-entry-save').disabled, false);
+    for (const kind of ['realm', 'master_realm', 'relic', 'quest', 'creature', 'item']) {
+        [...ui.document.querySelectorAll('#mf-kind option')].find(o => o.value === kind).selected = true;
+        $('#mf-kind').dispatchEvent(new ui.Event('change'));
+        assert.deepEqual([...ui.document.querySelectorAll('#manual-entry-fields [name]')].map(input => input.name), manualRecordFields()[kind]);
+        assert.deepEqual([...ui.document.querySelectorAll('#manual-entry-fields [name]')].filter(input => input.required).map(input => input.name), ['id']);
+    }
 });
 
 test('CAT-TASK-006: the dashboard script never parses markup', () => {
