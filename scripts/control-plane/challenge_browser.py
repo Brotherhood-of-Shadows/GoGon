@@ -1,9 +1,10 @@
 """Shared visual verification interaction for the Guide and HuntedCow browsers."""
 
+import asyncio
 from pathlib import Path
 
 import cv2
-from browser_debug import Reporter, debug_step, quiet_report
+from browser_debug import BrowserOperationTimeout, Reporter, debug_step, quiet_report
 
 
 LABELS = ("Verify you are human", "Confirme que \u00e9 humano")
@@ -34,7 +35,18 @@ async def click_verification(tab, profile_directory: Path, *, report: Reporter =
     for label in LABELS:
         operation = "label_lookup_en" if label == LABELS[0] else "label_lookup_pt"
         with debug_step(operation, report):
-            element = await tab.find(label, timeout=10 if label == LABELS[0] else 3)
+            lookup_seconds = 10 if label == LABELS[0] else 3
+            # nodriver's timeout only bounds its polling loop; an awaited frame/CDP call can
+            # stall before the loop checks elapsed time. Allow two seconds for its final poll,
+            # then abort the attempt instead of consuming the whole browser-helper deadline.
+            deadline = asyncio.timeout(lookup_seconds + 2)
+            try:
+                async with deadline:
+                    element = await tab.find(label, timeout=lookup_seconds)
+            except TimeoutError as error:
+                if deadline.expired():
+                    raise BrowserOperationTimeout("Browser label lookup exceeded hard deadline") from error
+                raise
         if element:
             with debug_step("label_click", report):
                 await element.mouse_click()

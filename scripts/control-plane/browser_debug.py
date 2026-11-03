@@ -6,6 +6,10 @@ from contextlib import contextmanager
 Reporter = Callable[[str, str], None]
 
 
+class BrowserOperationTimeout(TimeoutError):
+    """A browser operation exceeded its outer wall-clock deadline."""
+
+
 def quiet_report(operation: str, event: str) -> None:
     """Leave shared Guide interactions quiet unless a caller supplies a reporter."""
 

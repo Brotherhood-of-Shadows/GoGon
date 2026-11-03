@@ -78,10 +78,11 @@ asyncio.run(run())
   assert.match(verification, /SSO_PAGE:challenge/);
 });
 
-test('shared browser operations report the exact interrupted await without changing the interaction', () => {
+test('shared browser operations identify interruption and abort a lookup that ignores its own timeout', () => {
   const script = `
 import asyncio, importlib.util, sys, types
 from pathlib import Path
+from unittest.mock import patch
 sys.dont_write_bytecode = True
 sys.path.insert(0, 'scripts/control-plane')
 events = []
@@ -103,6 +104,10 @@ class Tab:
     async def find(self, label, timeout):
         if mode == 'lookup':
             await asyncio.Future()
+        if mode == 'notfound':
+            return None
+        if mode == 'internal_error':
+            raise TimeoutError('fixture browser error')
         return Element()
 async def run():
     global mode
@@ -117,6 +122,36 @@ async def run():
         assert events[-2:] == [(expected, 'start'), (expected, 'interrupted')], events
         if mode != 'screenshot':
             assert ('image_match', 'done') in events, events
+    mode = 'lookup'
+    events.clear()
+    original_timeout = asyncio.timeout
+    def accelerated_timeout(seconds):
+        assert seconds == 12, seconds
+        return original_timeout(0.02)
+    with patch.object(asyncio, 'timeout', side_effect=accelerated_timeout):
+        try:
+            await challenge_browser.click_verification(Tab(), Path('/tmp'), report=report)
+        except challenge_browser.BrowserOperationTimeout as error:
+            assert str(error) == 'Browser label lookup exceeded hard deadline'
+        else:
+            raise AssertionError('unresponsive lookup escaped its hard deadline')
+    assert events[-2:] == [('label_lookup_en', 'start'), ('label_lookup_en', 'interrupted')], events
+    assert not any(operation in ('label_lookup_pt', 'label_click') for operation, event in events), events
+    mode = 'notfound'
+    try:
+        await challenge_browser.click_verification(Tab(), Path('/tmp'))
+    except TimeoutError as error:
+        assert str(error) == 'Verification checkbox did not appear', error
+    else:
+        raise AssertionError('missing-element failure changed')
+    mode = 'internal_error'
+    try:
+        await challenge_browser.click_verification(Tab(), Path('/tmp'))
+    except TimeoutError as error:
+        assert str(error) == 'fixture browser error', error
+        assert not isinstance(error, challenge_browser.BrowserOperationTimeout)
+    else:
+        raise AssertionError('browser exception was swallowed')
 asyncio.run(run())
 `;
   const actual = spawnSync('python3', ['-c', script], { encoding: 'utf8', timeout: 5000 });

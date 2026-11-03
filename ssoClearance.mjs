@@ -45,6 +45,7 @@ function verificationFailure(error) {
     ['Xvfb failed to start', 'display_failed', 'The virtual display could not start.'],
     ['Challenge image is unavailable', 'challenge_image_missing', 'The verification screenshot or checkbox template is unavailable.'],
     ['Verification checkbox did not appear', 'checkbox_missing', 'The Cloudflare verification checkbox was not found.'],
+    ['Browser label lookup exceeded hard deadline', 'browser_lookup_timeout', 'The browser element lookup stalled and exceeded its hard deadline.'],
     ['HuntedCow verification did not reach the account form', 'account_page_timeout', 'The browser did not reach the HuntedCow account form after verification.'],
     ['HuntedCow verification produced no usable clearance', 'clearance_missing', 'The browser did not obtain a usable Cloudflare clearance cookie.'],
     ['GG_GUIDE_BROWSER_PROXY must be a local SOCKS5 endpoint', 'proxy_invalid', 'The browser proxy setting is invalid.'],

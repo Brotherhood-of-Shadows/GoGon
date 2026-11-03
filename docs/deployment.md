@@ -53,6 +53,11 @@ label lookup, clicks, page reads, navigation and cleanup. The last `start` witho
 the first interrupted inner operation, locates a stalled call. Page observations carry their own
 timestamps and can precede a stall; they are not a screenshot of the page at timeout. When reporting
 a failure, include the debug lines from that login attempt and its final error. No debug flag is needed.
+`browser_lookup_timeout` identifies a DOM/frame lookup that overran its own polling timeout. An
+outer deadline bounds these calls to the configured lookup duration plus two seconds (12 seconds
+for English, 5 for Portuguese), then aborts the attempt and cleans up the temporary browser. This
+prevents an unresponsive browser command from spending the full 90-second helper budget; it does
+not establish that verification will succeed on the next attempt.
 
 ## 2. Build and start
 
