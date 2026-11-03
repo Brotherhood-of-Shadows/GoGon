@@ -7,6 +7,25 @@ const execFileAsync = promisify(execFile);
 const COOKIE_VALUE = /^[A-Za-z0-9._-]{1,4096}$/;
 const TIMEOUT_MS = 100_000;
 const COOKIE_NAMES = new Set(['cf_clearance', 'hcs_session_key']);
+const DEBUG_OPERATIONS = Object.freeze({
+  browser_start: 'browser startup', navigation: 'page navigation', page_content: 'reading page content',
+  screenshot: 'taking screenshot', screenshot_read: 'reading screenshot', template_read: 'reading template',
+  image_match: 'image matching', image_click: 'image-based click', label_lookup_en: 'English label lookup',
+  label_lookup_pt: 'Portuguese label lookup', label_click: 'label-based click', verification: 'verification interaction',
+  cookies: 'reading browser result', user_agent: 'reading browser identity', browser_stop: 'browser shutdown',
+  profile_cleanup: 'temporary profile cleanup', page_challenge: 'page observed: challenge',
+  page_account_form: 'page observed: account form', page_other: 'page observed: other',
+});
+
+function debugEntry(line) {
+  const match = String(line).match(/^\[SSO_DEBUG:([a-z_]+):(start|done|interrupted|observed):(\d{1,7})\]\r?$/);
+  return match && Object.hasOwn(DEBUG_OPERATIONS, match[1])
+    ? { operation: match[1], event: match[2], elapsed: Number(match[3]) } : null;
+}
+
+function debugEntries(stderr) {
+  return String(stderr ?? '').split('\n').map(debugEntry).filter(Boolean);
+}
 
 export class SsoClearanceError extends Error {
   constructor(message, code = 'SSO_CLEARANCE_ERROR') {
@@ -56,22 +75,52 @@ function verificationFailure(error) {
   const detail = stages[stage] ? ` Last stage: ${stages[stage]}.` : '';
   const pageDetail = page === 'challenge' ? ' Last observed page: Cloudflare challenge.'
     : page === 'account_form' ? ' Last observed page: account form.' : page === 'other' ? ' Last observed page: neither the challenge nor the account form.' : '';
-  return new SsoClearanceError(`HuntedCow browser verification did not complete (${reason[0]}). ${reason[1]}${detail}${pageDetail}`, `SSO_${reason[0].toUpperCase()}`);
+  const entries = debugEntries(stderr);
+  // Inner operations unwind before their enclosing step. Keep the first interrupted operation,
+  // even when cleanup later succeeds; for a killed process use the last unmatched start.
+  const pending = new Map();
+  for (const entry of entries) {
+    if (entry.event === 'start') { pending.delete(entry.operation); pending.set(entry.operation, entry); }
+    else if (entry.event === 'done') pending.delete(entry.operation);
+  }
+  const stalled = entries.find(entry => entry.event === 'interrupted') ?? [...pending.values()].at(-1);
+  const operationDetail = stalled ? ` Interrupted operation: ${DEBUG_OPERATIONS[stalled.operation]} (+${stalled.elapsed} ms).` : '';
+  return new SsoClearanceError(`HuntedCow browser verification did not complete (${reason[0]}). ${reason[1]}${detail}${pageDetail}${operationDetail}`, `SSO_${reason[0].toUpperCase()}`);
 }
 
 /** Return browser-issued HuntedCow cookies and the matching User-Agent after verification. */
-export async function renewSsoClearance({ entryUrl = 'https://huntedcow.com/auth?game=6', signal, execFileFn = execFileAsync } = {}) {
+export async function renewSsoClearance({ entryUrl = 'https://huntedcow.com/auth?game=6', signal, execFileFn = execFileAsync, log = console.warn } = {}) {
   const url = new URL(entryUrl);
   if (url.protocol !== 'https:' || !['huntedcow.com', 'account.huntedcow.com'].includes(url.hostname)
       || url.pathname !== '/auth') throw new SsoClearanceError('Invalid HuntedCow SSO entry URL.');
   let output;
+  let streamed = false;
+  let tail = '';
+  const emit = entry => log(`[GoGon_SSO_DEBUG] +${entry.elapsed}ms ${DEBUG_OPERATIONS[entry.operation]}: ${entry.event}`);
+  const onStderr = chunk => {
+    const lines = (tail + String(chunk)).split('\n');
+    tail = lines.pop().slice(-256);
+    for (const line of lines) {
+      const entry = debugEntry(line);
+      if (entry) emit(entry);
+    }
+  };
+  let childStderr;
   try {
-    ({ stdout: output } = await execFileFn('xvfb-run', [
+    const pending = execFileFn('xvfb-run', [
       '-a', '-s', '-screen 0 1280x900x24',
       '/opt/gogon-guide-python/bin/python', '/app/scripts/control-plane/renew-sso-clearance.py', url.toString(),
-    ], { encoding: 'utf8', maxBuffer: 16 * 1024, timeout: TIMEOUT_MS, signal }));
+    ], { encoding: 'utf8', maxBuffer: 16 * 1024, timeout: TIMEOUT_MS, signal });
+    childStderr = pending.child?.stderr;
+    if (childStderr) { streamed = true; childStderr.on('data', onStderr); }
+    const result = await pending;
+    output = result.stdout;
+    if (!streamed) debugEntries(result.stderr).forEach(emit);
   } catch (error) {
+    if (!streamed) debugEntries(error?.stderr).forEach(emit);
     throw verificationFailure(error);
+  } finally {
+    childStderr?.removeListener('data', onStderr);
   }
 
   let result;

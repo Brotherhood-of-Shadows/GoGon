@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { renewSsoClearance, SsoClearanceError } from '../../ssoClearance.mjs';
 
 const credentials = { userAgent: 'Chromium fixture', cookies: [
@@ -80,4 +81,41 @@ test('SSO timeout identifies the latest browser stage and page using only allow-
     assert.doesNotMatch(error.message, /Last stage|Last observed page|private-cookie-or-url-value/);
     return true;
   });
+});
+
+test('SSO streams only safe operation lines and preserves the inner interrupted call after cleanup', async () => {
+  const lines = [], stderr = new EventEmitter();
+  const secret = 'private-cookie-page-or-url-value';
+  const trace = `[SSO_DEBUG:verification:start:8000]\n[SSO_DEBUG:screenshot:start:8001]\n${secret}\n[SSO_DEBUG:screenshot:interrupted:90000]\n[SSO_DEBUG:verification:interrupted:90001]\n[SSO_DEBUG:browser_stop:start:90002]\n[SSO_DEBUG:browser_stop:done:90003]\n[SSO_DEBUG:${secret}:done:1]\nTimeoutError\n`;
+  const execFileFn = () => {
+    const pending = new Promise((resolve, reject) => queueMicrotask(() => {
+      stderr.emit('data', trace.slice(0, 35));
+      stderr.emit('data', trace.slice(35));
+      reject(Object.assign(new Error(secret), { stderr: trace, stdout: secret }));
+    }));
+    pending.child = { stderr };
+    return pending;
+  };
+  await assert.rejects(renewSsoClearance({ execFileFn, log: line => lines.push(line) }), error => {
+    assert.equal(error.code, 'SSO_BROWSER_TIMEOUT');
+    assert.match(error.message, /Interrupted operation: taking screenshot \(\+90000 ms\)/);
+    assert.doesNotMatch(error.message, /Interrupted operation: browser shutdown/);
+    assert.doesNotMatch(error.message, new RegExp(secret));
+    return true;
+  });
+  assert.equal(stderr.listenerCount('data'), 0);
+  assert.equal(lines.length, 6);
+  assert.equal(lines[1], '[GoGon_SSO_DEBUG] +8001ms taking screenshot: start');
+  assert.doesNotMatch(lines.join('\n'), new RegExp(secret));
+});
+
+test('hard-killed helpers identify the unmatched operation; successful helpers still stream diagnostics and validate cookies', async () => {
+  const logs = [];
+  await assert.rejects(renewSsoClearance({ log: line => logs.push(line), execFileFn: async () => {
+    throw Object.assign(new Error('fixture process timeout'), { killed: true, signal: 'SIGTERM', stderr: '[SSO_DEBUG:verification:start:8000]\n[SSO_DEBUG:label_lookup_en:start:8002]\n' });
+  } }), error => error.code === 'SSO_PROCESS_TIMEOUT' && /Interrupted operation: English label lookup/.test(error.message));
+  const result = await renewSsoClearance({ log: line => logs.push(line), execFileFn: async () => ({ stdout: JSON.stringify(credentials), stderr: '[SSO_DEBUG:user_agent:done:25000]\nprivate-cookie-value\n' }) });
+  assert.deepEqual(result, credentials);
+  assert.equal(logs.at(-1), '[GoGon_SSO_DEBUG] +25000ms reading browser identity: done');
+  assert.doesNotMatch(logs.join('\n'), /private-cookie-value|clearance.fixture|session-fixture/);
 });

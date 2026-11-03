@@ -7,6 +7,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Literal
@@ -14,6 +15,7 @@ from typing import Literal
 import nodriver
 from challenge_browser import click_verification
 from guide_browser_environment import prepare_browser_environment
+from browser_debug import Reporter, debug_step, quiet_report
 
 
 CLEARANCE = re.compile(r"^[A-Za-z0-9._-]{1,4096}$")
@@ -30,26 +32,34 @@ def report_stage(stage: Literal["browser_start", "navigation", "account_wait", "
     print(f"[SSO_STAGE:{stage}]", file=sys.stderr, flush=True)
 
 
-async def account_is_loaded(tab) -> bool:
+async def account_is_loaded(tab, report: Reporter = quiet_report) -> bool:
     """Return whether the browser has reached the HuntedCow account form."""
-    html = await tab.get_content()
+    with debug_step("page_content", report):
+        html = await tab.get_content()
     loaded = bool(ACCOUNT_PAGE.search(html))
     page = "account_form" if loaded else "challenge" if CHALLENGE_PAGE.search(html) else "other"
+    report(f"page_{page}", "observed")
     print(f"[SSO_PAGE:{page}]", file=sys.stderr, flush=True)
     return loaded
 
 
-async def wait_for_account(tab, seconds: int) -> bool:
+async def wait_for_account(tab, seconds: int, report: Reporter = quiet_report) -> bool:
     """Wait for an account page without treating the challenge page as success."""
     for _ in range(seconds // 2):
-        if await account_is_loaded(tab):
+        if await account_is_loaded(tab, report):
             return True
         await asyncio.sleep(2)
-    return await account_is_loaded(tab)
+    return await account_is_loaded(tab, report)
 
 
 async def renew(entry_url: str) -> None:
     """Run verification, outputting only validated HuntedCow cookies and browser User-Agent."""
+    started_at = time.monotonic()
+
+    def report(operation: str, event: str) -> None:
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        print(f"[SSO_DEBUG:{operation}:{event}:{elapsed_ms}]", file=sys.stderr, flush=True)
+
     parsed = urlparse(entry_url)
     if parsed.scheme != "https" or parsed.hostname not in ("huntedcow.com", "account.huntedcow.com") \
             or parsed.path != "/auth":
@@ -73,29 +83,33 @@ async def renew(entry_url: str) -> None:
     browser = None
     try:
         report_stage("browser_start")
-        browser = await nodriver.start(
-            browser_executable_path=browser_path,
-            user_data_dir=profile_directory,
-            browser_args=browser_args,
-            headless=False,
-            expert=False,
-            sandbox=False if os.name == "posix" else True,
-        )
+        with debug_step("browser_start", report):
+            browser = await nodriver.start(
+                browser_executable_path=browser_path,
+                user_data_dir=profile_directory,
+                browser_args=browser_args,
+                headless=False,
+                expert=False,
+                sandbox=False if os.name == "posix" else True,
+            )
         report_stage("navigation")
-        tab = await browser.get(entry_url)
+        with debug_step("navigation", report):
+            tab = await browser.get(entry_url)
         report_stage("account_wait")
-        if not await wait_for_account(tab, 8):
+        if not await wait_for_account(tab, 8, report):
             for _ in range(2):
                 report_stage("verification")
-                await click_verification(tab, profile_directory)
+                with debug_step("verification", report):
+                    await click_verification(tab, profile_directory, report=report)
                 report_stage("account_wait_after_verification")
-                if await wait_for_account(tab, 35):
+                if await wait_for_account(tab, 35, report):
                     break
             else:
                 raise TimeoutError("HuntedCow verification did not reach the account form")
 
         report_stage("cookies")
-        cookies = await browser.cookies.get_all()
+        with debug_step("cookies", report):
+            cookies = await browser.cookies.get_all()
         selected = [{"name": cookie.name, "value": cookie.value, "domain": cookie.domain,
                      "path": cookie.path or "/", "secure": bool(cookie.secure)}
                     for cookie in cookies if cookie.name in COOKIE_NAMES and cookie.domain in COOKIE_DOMAINS]
@@ -103,18 +117,21 @@ async def renew(entry_url: str) -> None:
                 or any(not CLEARANCE.fullmatch(cookie["value"]) for cookie in selected):
             raise ValueError("HuntedCow verification produced no usable clearance")
         report_stage("user_agent")
-        user_agent = await tab.evaluate("navigator.userAgent")
+        with debug_step("user_agent", report):
+            user_agent = await tab.evaluate("navigator.userAgent")
         if not isinstance(user_agent, str) or not 1 <= len(user_agent) <= 300 \
                 or any(ord(character) < 32 or ord(character) == 127 for character in user_agent):
             raise ValueError("HuntedCow browser produced an invalid user agent")
         print(json.dumps({"cookies": selected, "userAgent": user_agent}), flush=True)
     finally:
         if browser is not None:
-            browser.stop()
+            with debug_step("browser_stop", report):
+                browser.stop()
         await asyncio.sleep(1)
         for attempt in range(5):
             try:
-                shutil.rmtree(profile_directory)
+                with debug_step("profile_cleanup", report):
+                    shutil.rmtree(profile_directory)
                 break
             except PermissionError:
                 if attempt == 4:

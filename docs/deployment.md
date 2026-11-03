@@ -47,6 +47,12 @@ Timeout errors include the last browser stage (startup, navigation, verification
 or result extraction) and the last recognized page category when available. These labels contain no
 cookies, credentials, page content or token-bearing URLs. A successful manual login elsewhere makes a
 general outage less likely but does not establish that the VPS browser can complete verification.
+Browser recovery also streams `[GoGon_SSO_DEBUG]` lines with elapsed milliseconds and `start`,
+`done`, `interrupted`, or `observed` events. These cover screenshot capture/read, image matching,
+label lookup, clicks, page reads, navigation and cleanup. The last `start` without a `done`, or
+the first interrupted inner operation, locates a stalled call. Page observations carry their own
+timestamps and can precede a stall; they are not a screenshot of the page at timeout. When reporting
+a failure, include the debug lines from that login attempt and its final error. No debug flag is needed.
 
 ## 2. Build and start
 
