@@ -9,6 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
+from typing import Literal
 
 import nodriver
 from challenge_browser import click_verification
@@ -20,11 +21,22 @@ PROXY = re.compile(r"^socks5://127\.0\.0\.1:\d{1,5}$")
 ACCOUNT_PAGE = re.compile(r'<form\b[^>]*id=["\']m-login-form["\']', re.I)
 COOKIE_NAMES = {"cf_clearance", "hcs_session_key"}
 COOKIE_DOMAINS = {"huntedcow.com", ".huntedcow.com", "account.huntedcow.com"}
+CHALLENGE_PAGE = re.compile(r"/cdn-cgi/challenge-platform/|cf[_-]chl[_-]|<title>\s*Just a moment", re.I)
+
+
+def report_stage(stage: Literal["browser_start", "navigation", "account_wait", "verification",
+                                "account_wait_after_verification", "cookies", "user_agent"]) -> None:
+    """Write a code-owned stage to stderr; stdout remains reserved for secret result data."""
+    print(f"[SSO_STAGE:{stage}]", file=sys.stderr, flush=True)
 
 
 async def account_is_loaded(tab) -> bool:
     """Return whether the browser has reached the HuntedCow account form."""
-    return bool(ACCOUNT_PAGE.search(await tab.get_content()))
+    html = await tab.get_content()
+    loaded = bool(ACCOUNT_PAGE.search(html))
+    page = "account_form" if loaded else "challenge" if CHALLENGE_PAGE.search(html) else "other"
+    print(f"[SSO_PAGE:{page}]", file=sys.stderr, flush=True)
+    return loaded
 
 
 async def wait_for_account(tab, seconds: int) -> bool:
@@ -60,6 +72,7 @@ async def renew(entry_url: str) -> None:
     prepare_browser_environment(profile_directory)
     browser = None
     try:
+        report_stage("browser_start")
         browser = await nodriver.start(
             browser_executable_path=browser_path,
             user_data_dir=profile_directory,
@@ -68,15 +81,20 @@ async def renew(entry_url: str) -> None:
             expert=False,
             sandbox=False if os.name == "posix" else True,
         )
+        report_stage("navigation")
         tab = await browser.get(entry_url)
+        report_stage("account_wait")
         if not await wait_for_account(tab, 8):
             for _ in range(2):
+                report_stage("verification")
                 await click_verification(tab, profile_directory)
+                report_stage("account_wait_after_verification")
                 if await wait_for_account(tab, 35):
                     break
             else:
                 raise TimeoutError("HuntedCow verification did not reach the account form")
 
+        report_stage("cookies")
         cookies = await browser.cookies.get_all()
         selected = [{"name": cookie.name, "value": cookie.value, "domain": cookie.domain,
                      "path": cookie.path or "/", "secure": bool(cookie.secure)}
@@ -84,6 +102,7 @@ async def renew(entry_url: str) -> None:
         if not any(cookie["name"] == "cf_clearance" for cookie in selected) \
                 or any(not CLEARANCE.fullmatch(cookie["value"]) for cookie in selected):
             raise ValueError("HuntedCow verification produced no usable clearance")
+        report_stage("user_agent")
         user_agent = await tab.evaluate("navigator.userAgent")
         if not isinstance(user_agent, str) or not 1 <= len(user_agent) <= 300 \
                 or any(ord(character) < 32 or ord(character) == 127 for character in user_agent):

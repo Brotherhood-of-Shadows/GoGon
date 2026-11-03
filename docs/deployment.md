@@ -43,6 +43,10 @@ When HuntedCow challenges game SSO, the container uses the same temporary VPS Ch
 environment as Guide discovery. It keeps the resulting HuntedCow cookies and matching User-Agent only
 in the running process, then submits the account form and follows the game redirect. A verification
 failure stops boot with a HuntedCow browser error; it does not mean the account password was rejected.
+Timeout errors include the last browser stage (startup, navigation, verification, account-form wait,
+or result extraction) and the last recognized page category when available. These labels contain no
+cookies, credentials, page content or token-bearing URLs. A successful manual login elsewhere makes a
+general outage less likely but does not establish that the VPS browser can complete verification.
 
 ## 2. Build and start
 

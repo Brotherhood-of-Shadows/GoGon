@@ -64,3 +64,20 @@ test('SSO browser failures identify safe actionable reasons without exposing coo
     }, code);
   }
 });
+
+test('SSO timeout identifies the latest browser stage and page using only allow-listed labels', async () => {
+  const secret = 'private-cookie-or-url-value';
+  const stderr = `[SSO_STAGE:browser_start]\n[SSO_STAGE:navigation]\n[SSO_STAGE:account_wait]\n[SSO_PAGE:challenge]\n[SSO_STAGE:verification]\nasyncio.exceptions.TimeoutError\n${secret}`;
+  await assert.rejects(renewSsoClearance({ execFileFn: async () => { throw Object.assign(new Error(secret), { stderr, stdout: secret }); } }), error => {
+    assert.equal(error.code, 'SSO_BROWSER_TIMEOUT');
+    assert.match(error.message, /Last stage: the browser verification interaction/);
+    assert.match(error.message, /Last observed page: Cloudflare challenge/);
+    assert.doesNotMatch(error.message, /starting Chromium|private-cookie-or-url-value/);
+    return true;
+  });
+  await assert.rejects(renewSsoClearance({ execFileFn: async () => { throw Object.assign(new Error(secret), { stderr: `[SSO_STAGE:${secret}]\n[SSO_PAGE:${secret}]\nTimeoutError` }); } }), error => {
+    assert.equal(error.code, 'SSO_BROWSER_TIMEOUT');
+    assert.doesNotMatch(error.message, /Last stage|Last observed page|private-cookie-or-url-value/);
+    return true;
+  });
+});

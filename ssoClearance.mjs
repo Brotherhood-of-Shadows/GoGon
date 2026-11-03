@@ -44,7 +44,19 @@ function verificationFailure(error) {
     else if (['SIGKILL', 'SIGSEGV', 'SIGABRT'].includes(error?.signal)) reason = ['browser_terminated', `The browser helper was terminated by ${error.signal}.`];
     else reason = ['helper_failed', Number.isInteger(error?.code) && error.code >= 0 && error.code <= 255 ? `The browser helper exited with code ${error.code}.` : 'The browser helper failed to run.'];
   }
-  return new SsoClearanceError(`HuntedCow browser verification did not complete (${reason[0]}). ${reason[1]}`, `SSO_${reason[0].toUpperCase()}`);
+  const stages = {
+    browser_start: 'starting Chromium', navigation: 'loading the HuntedCow login page',
+    account_wait: 'waiting for the account form', verification: 'the browser verification interaction',
+    account_wait_after_verification: 'waiting for the account form after verification',
+    cookies: 'reading the browser result', user_agent: 'reading the browser identity',
+  };
+  const stage = [...stderr.matchAll(/^\[SSO_STAGE:([a-z_]+)\]$/gm)].at(-1)?.[1];
+  const page = [...stderr.matchAll(/^\[SSO_PAGE:(account_form|challenge|other)\]$/gm)].at(-1)?.[1];
+  // Report only allow-listed labels, never browser HTML, URLs, cookies or raw subprocess output.
+  const detail = stages[stage] ? ` Last stage: ${stages[stage]}.` : '';
+  const pageDetail = page === 'challenge' ? ' Last observed page: Cloudflare challenge.'
+    : page === 'account_form' ? ' Last observed page: account form.' : page === 'other' ? ' Last observed page: neither the challenge nor the account form.' : '';
+  return new SsoClearanceError(`HuntedCow browser verification did not complete (${reason[0]}). ${reason[1]}${detail}${pageDetail}`, `SSO_${reason[0].toUpperCase()}`);
 }
 
 /** Return browser-issued HuntedCow cookies and the matching User-Agent after verification. */
