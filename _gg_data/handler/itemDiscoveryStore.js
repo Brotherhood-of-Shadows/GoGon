@@ -14,7 +14,7 @@ function stateOf(row) {
         nextItemId: row.next_item_id == null ? null : Number(row.next_item_id), scanId: row.scan_id, scanStartedAt: row.scan_started_at,
         lastCompletedAt: row.last_completed_at, nextCheckAt: row.next_check_at, lastError: row.last_error,
         checkedInScan: Number(row.checked_in_scan), foundInScan: Number(row.found_in_scan), discoveredTotal: Number(row.discovered_total),
-        updatedAt: row.updated_at };
+        updatedAt: row.updated_at, lastRequest: row.last_request ? JSON.parse(row.last_request) : null };
 }
 
 /** Durable daily frontier, announcement dedupe, and atomic catalog/outbox checkpoints.
@@ -46,7 +46,7 @@ export function createItemDiscoveryStore(db, catalog, { now = Date.now } = {}) {
          * @returns {Promise<object[]>} Up to twenty typed item records.
          */
         async recent() {
-            return (await db.query('SELECT item_id, payload, first_seen_at, last_seen_at, announced FROM catalog_discovered_items ORDER BY first_seen_at DESC, item_id DESC LIMIT 20'))
+            return (await db.query('SELECT item_id, payload, first_seen_at, last_seen_at, announced FROM catalog_discovered_items WHERE announced = 1 ORDER BY first_seen_at DESC, item_id DESC LIMIT 20'))
                 .map(row => ({ id: Number(row.item_id), record: JSON.parse(row.payload), firstSeenAt: row.first_seen_at, lastSeenAt: row.last_seen_at, announced: Number(row.announced) === 1 }));
         },
         /** Pauses/resumes discovery or sets an owner-chosen starting point without clearing dedupe.
@@ -103,6 +103,24 @@ export function createItemDiscoveryStore(db, catalog, { now = Date.now } = {}) {
                 await tx.query('UPDATE catalog_item_discovery SET last_checked_id = ?, next_item_id = ?, checked_in_scan = checked_in_scan + 1, last_error = NULL, next_check_at = NULL, updated_at = ? WHERE id = 1', [id, id + 1, at(now())]);
                 return read(tx);
             });
+        },
+        /** Saves code-owned diagnostic metadata only while this scan is still active.
+         * @param {string} scanId Active scan identity.
+         * @param {object} request Validated request metadata produced by the worker.
+         * @returns {Promise<void>}
+         */
+        async recordRequest(scanId, request) {
+            const allowed = ['itemId', 'phase', 'at', 'outcome', 'httpStatus', 'route', 'contentType', 'bytes', 'fingerprint', 'parserCode'];
+            if (Object.keys(request).some(key => !allowed.includes(key)) || Buffer.byteLength(canonicalJson(request)) > 1024
+                || !Number.isInteger(request.itemId) || request.itemId < 1 || request.itemId > MAX_TOOLTIP_ITEM_ID
+                || !['probe', 'scan'].includes(request.phase) || typeof request.at !== 'string' || request.at.length !== 24 || !Number.isFinite(Date.parse(request.at))
+                || !/^[a-z_]{1,40}$/.test(request.outcome) || !['unknown', 'item_tooltip', 'game_page', 'huntedcow_page', 'other'].includes(request.route)
+                || request.httpStatus !== null && (!Number.isInteger(request.httpStatus) || request.httpStatus < 100 || request.httpStatus > 599)
+                || ![null, 'html', 'json', 'text', 'other'].includes(request.contentType)
+                || request.bytes !== null && (!Number.isSafeInteger(request.bytes) || request.bytes < 0)
+                || request.fingerprint !== null && !/^[a-f0-9]{64}$/.test(request.fingerprint)
+                || request.parserCode !== null && !/^[a-z_]{1,40}$/.test(request.parserCode)) throw invalid('Invalid item request metadata.');
+            await db.query('UPDATE catalog_item_discovery SET last_request = ? WHERE id = 1 AND enabled = 1 AND scan_id = ?', [canonicalJson(request), scanId]);
         },
         /** Projects provisional item data and persists its notification/cursor in the same commit.
          * @param {string} scanId Active scan.

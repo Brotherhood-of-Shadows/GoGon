@@ -339,6 +339,9 @@ test('AC-CAT-008: dashboard state (SSE) carries catalog jobs and guide status', 
     assert.ok(Array.isArray(state.json.catalog.jobs));
     assert.equal(state.json.catalog.guide.length, 6);
     assert.equal(state.json.catalog.available.guide_discovery, null);
+    assert.ok(state.json.catalog.coverage.item);
+    const current = await req('GET', '/api/catalog/summary', { cookie });
+    assert.deepEqual(state.json.catalog.coverage, current.json.coverage);
 });
 
 test('manual creation accepts only an ID for every Guide kind and exposes incomplete browse/detail records', async () => {

@@ -4,7 +4,7 @@
 spec:
   id: "catalog-sync-v1"
   status: locked
-  version: "1.9.1"
+  version: "1.9.2"
   created: "2026-09-25"
   updated: "2026-11-03"
 
@@ -13,6 +13,12 @@ spec:
     depends_on: ["data-model", "api-surface", "security"]
 
   changelog:
+    - version: "1.9.2"
+      date: "2026-11-03"
+      changes:
+        - "Owner-provided 17070 Twangy's Axe parses successfully; regression verifies the actual 17069 Quest probe through Epic discovery, incomplete storage, one outbox announcement and last-valid+10 coverage. Compact tooltips tolerate trailing non-content script/style/link tags. Recognize current game landing and HuntedCow login forms before item parsing; align game request User-Agent/language/referer with existing session settings."
+        - "Migration 022 retains safe last-request diagnostics: ID, phase, status/category, byte count, body fingerprint and specific parser rejection. Show metadata in Catalog and log failed reads without response bodies/cookies/URLs. Exclude baseline validation rows from Recent discoveries while preserving their dedupe ledger."
+        - "Guide detail counts now use live SSE coverage; distinguish last index scan from incomplete detail coverage and expose the worker's current retry deadline. Apply existing five-minute browser-renewal backoff to initial missing-clearance failures as well as stale-clearance failures. Challenges retain progress; no challenge solving or login flow changed."
     - version: "1.9.1"
       date: "2026-11-03"
       changes:

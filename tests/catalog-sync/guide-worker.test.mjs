@@ -264,3 +264,47 @@ test('guide worker retries a transient browser failure after five minutes withou
     assert.equal(renewals, 2);
     assert.equal(relay.calls.submissions[1].results[0].outcome, 'ok');
 });
+
+test('initial browser renewal failure with no clearance also backs off five minutes and exposes safe retry state', async () => {
+    const relay = fakeRelay();
+    let currentTime = Date.now();
+    const nextLease = relay.nextLease;
+    relay.nextLease = async workerId => {
+        const next = await nextLease(workerId);
+        next.lease.expiresAt = new Date(currentTime + 60_000).toISOString();
+        return next;
+    };
+    let renewals = 0, reads = 0;
+    const worker = createGuideWorker({ relay, clearance: '', now: () => currentTime,
+        renewClearance: async () => {
+            if (++renewals === 1) throw new GuideClearanceError('private browser failure');
+            return { clearance: 'private-clearance-cookie', userAgent: 'fixture browser' };
+        }, fetchFn: async () => { reads++; return new Response(itemIndex, { headers: { 'content-type': 'text/html' } }); } });
+    await worker.run();
+    assert.deepEqual(worker.status(), { state: 'backoff', kind: 'item', reason: 'browser_verification_failed', nextRetryAt: new Date(currentTime + 300_000).toISOString() });
+    assert.doesNotMatch(JSON.stringify(worker.status()), /private/);
+    currentTime += 299_999;
+    assert.deepEqual(await worker.run(), { status: 'challenged' });
+    assert.equal(renewals, 1);
+    assert.equal(reads, 0);
+    currentTime++;
+    assert.equal((await worker.run()).challenge, false);
+    assert.equal(renewals, 2);
+    assert.equal(reads, 1);
+    assert.equal(worker.status().state, 'ready');
+});
+
+test('Guide worker stays running through submission and reports ready only after the batch settles', async () => {
+    const relay = fakeRelay();
+    let began, finish;
+    const submitting = new Promise(resolve => { began = resolve; });
+    relay.submit = async () => { began(); await new Promise(resolve => { finish = resolve; }); return { sweepComplete: false }; };
+    const worker = createGuideWorker({ relay, clearance: 'fixture-clearance', fetchFn: async () => new Response(itemIndex, { headers: { 'content-type': 'text/html' } }) });
+    const run = worker.run();
+    await submitting;
+    assert.equal(worker.status().state, 'running');
+    assert.deepEqual(await worker.run(), { status: 'busy' });
+    finish();
+    await run;
+    assert.equal(worker.status().state, 'ready');
+});

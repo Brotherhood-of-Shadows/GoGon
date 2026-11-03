@@ -5,32 +5,55 @@ import { gameQueue } from './requestPolicy.js';
 import { ItemTooltipError, itemReleaseMessage, parseItemTooltip } from './itemTooltip.js';
 import { bindAccount, isCurrentAccount } from '../config/accountScope.mjs';
 import { CatalogError } from '../_gg_data/handler/catalogStore.js';
+import { createHash } from 'node:crypto';
+
+function responseRoute(value) {
+    try {
+        const url = new URL(value);
+        if (url.hostname === 'www.fallensword.com' && url.pathname === '/fetchitem.php') return 'item_tooltip';
+        if (url.hostname === 'www.fallensword.com' && ['/', '/index.php'].includes(url.pathname)) return 'game_page';
+        if (['huntedcow.com', 'account.huntedcow.com'].includes(url.hostname)) return 'huntedcow_page';
+        return 'other';
+    } catch { return 'unknown'; }
+}
 
 /** Daily discovery in resumable, rate-limited CatalogSync batches; never submits game actions.
  * @param {object} dependencies Injected persistence, authenticated GET transport and settings.
  * @returns {object} Worker and owner controls.
  */
-export function createItemDiscovery({ store, fetchFn, getWebhook, sessionReady = () => true, queue = gameQueue, now = Date.now, policy = GAME_POLICY }) {
+export function createItemDiscovery({ store, fetchFn, getWebhook, getHeaders = () => ({}), log = console.warn, sessionReady = () => true, queue = gameQueue, now = Date.now, policy = GAME_POLICY }) {
     let running = false;
-    async function request(id, signal) {
+    async function request(id, signal, phase) {
         return queue.run(async () => {
             signal?.throwIfAborted();
             const timeout = AbortSignal.timeout(policy.requestTimeoutMs);
             const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
             let response, body;
+            const diagnostic = { itemId: id, phase, at: new Date(now()).toISOString(), httpStatus: null, route: 'unknown', contentType: null, bytes: null, fingerprint: null, parserCode: null };
+            const finish = result => ({ ...result, diagnostic: { ...diagnostic, outcome: result.ok ? result.found ? 'found' : 'missing' : result.reason } });
             try {
-                response = await fetchFn(assertItemTooltipUrl(itemTooltipUrl(id)), { method: 'GET', redirect: 'follow', signal: combined, headers: { accept: 'text/html', 'cache-control': 'no-cache' } });
+                response = await fetchFn(assertItemTooltipUrl(itemTooltipUrl(id)), { method: 'GET', redirect: 'follow', signal: combined, headers: { ...getHeaders(), accept: 'text/html', 'cache-control': 'no-cache' } });
+                diagnostic.httpStatus = response.status;
+                diagnostic.route = responseRoute(response.url);
                 body = await response.text();
             } catch (error) {
                 if (signal?.aborted) throw signal.reason ?? error;
-                return { ok: false, reason: timeout.aborted ? 'timeout' : 'network_error' };
+                return finish({ ok: false, reason: timeout.aborted ? 'timeout' : 'network_error' });
             }
             signal?.throwIfAborted();
             const classification = classifyResponse({ status: response.status, contentType: response.headers.get('content-type') ?? '', cfMitigated: response.headers.get('cf-mitigated'), body }, 'html');
+            const contentType = response.headers.get('content-type') ?? '';
+            diagnostic.contentType = /html/i.test(contentType) ? 'html' : /json/i.test(contentType) ? 'json' : /text/i.test(contentType) ? 'text' : 'other';
+            diagnostic.bytes = Buffer.byteLength(body);
+            diagnostic.fingerprint = createHash('sha256').update(body).digest('hex');
             const explicitNegative = response.status >= 200 && response.status < 300 && body.trim() === 'Invalid Request';
-            if (classification.class !== 'ok' && !(classification.class === 'malformed' && explicitNegative)) return { ok: false, reason: classification.class };
-            try { return { ok: true, ...parseItemTooltip(body, id) }; }
-            catch (error) { if (error instanceof ItemTooltipError) return { ok: false, reason: 'unrecognized_tooltip' }; throw error; }
+            if (classification.class !== 'ok' && !(classification.class === 'malformed' && explicitNegative)) return finish({ ok: false, reason: classification.class });
+            try { return finish({ ok: true, ...parseItemTooltip(body, id) }); }
+            catch (error) {
+                if (!(error instanceof ItemTooltipError)) throw error;
+                diagnostic.parserCode = error.code;
+                return finish({ ok: false, reason: 'unrecognized_tooltip' });
+            }
         }, signal);
     }
 
@@ -70,11 +93,17 @@ export function createItemDiscovery({ store, fetchFn, getWebhook, sessionReady =
                 await store.fail(state.scanId, reason, reason === 'challenge' ? policy.backoffMs.at(-1) : policy.backoffMs[1], { resetTail });
                 return { status: 'backoff', reason, requests, announced };
             };
-            const probe = async () => {
+            const read = async (id, phase) => {
                 current();
-                const result = await request(state.lastValidId, signal);
+                const result = await request(id, signal, phase);
                 requests++;
                 current();
+                await store.recordRequest(state.scanId, result.diagnostic);
+                if (!result.ok) log(`[Catalog Items] ID ${id} (${phase}): ${result.reason}; HTTP ${result.diagnostic.httpStatus ?? '-'}; route ${result.diagnostic.route}; parser ${result.diagnostic.parserCode ?? '-'}; bytes ${result.diagnostic.bytes ?? '-'}.`);
+                return result;
+            };
+            const probe = async () => {
+                const result = await read(state.lastValidId, 'probe');
                 if (!result.ok) return result.reason;
                 if (!result.found) return 'known_item_unavailable';
                 await store.found(state.scanId, result.record, itemReleaseMessage(result.record, new Date(now()).toISOString()), { probe: true });
@@ -96,9 +125,7 @@ export function createItemDiscovery({ store, fetchFn, getWebhook, sessionReady =
                         return { status: 'complete', requests, announced, lastValidId: state.lastValidId, lastCheckedId: state.lastCheckedId };
                     }
                     const id = state.nextItemId;
-                    const result = await request(id, signal);
-                    requests++;
-                    current();
+                    const result = await read(id, 'scan');
                     if (!result.ok) return await failure(result.reason);
                     if (result.found) {
                         state = await store.found(state.scanId, result.record, itemReleaseMessage(result.record, new Date(now()).toISOString()));

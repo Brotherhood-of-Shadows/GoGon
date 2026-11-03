@@ -12,7 +12,7 @@ import * as engine from '../engine.js';
 import { drainDiscordQueue } from '../utils.js';
 import { notificationOutbox } from '../notificationDispatcher.js';
 import { setAccountScope, profileScope } from '../config/accountScope.mjs';
-import { resetSession, setCredentialProvider, login, isLoggedIn, authedFetch } from '../session.mjs';
+import { resetSession, setCredentialProvider, login, isLoggedIn, authedFetch, DEFAULT_UA, DEFAULT_LANG } from '../session.mjs';
 import { createCatalogStore } from '../_gg_data/handler/catalogStore.js';
 import { createGuideDiscoveryStore } from '../_gg_data/handler/guideDiscoveryStore.js';
 import { createCollector } from '../catalog/collector.js';
@@ -45,9 +45,10 @@ export async function createCatalog() {
         renewClearance: renewGuideClearance,
     });
     const itemDiscovery = createItemDiscovery({ store: createItemDiscoveryStore(db, store), fetchFn: authedFetch,
+        getHeaders: () => ({ 'user-agent': getSetting('GG_UA') || DEFAULT_UA, 'accept-language': getSetting('GG_LANG') || DEFAULT_LANG, referer: 'https://www.fallensword.com/index.php' }),
         getWebhook: () => getSetting('GG_UPCOMING_WEBHOOK'), sessionReady: () => !engine.isPaused() });
     configureCatalogTask({ store, collector, guideWorker, itemDiscovery });
-    const service = createCatalogService({ db, store, guideStore, collector, relay, itemDiscovery, seeds: createSeedService({ db, store }) });
+    const service = createCatalogService({ db, store, guideStore, collector, relay, itemDiscovery, guideWorker, seeds: createSeedService({ db, store }) });
     return { db, store, guideStore, collector, relay, service, runNow: () => runCatalogSync({}) };
 }
 

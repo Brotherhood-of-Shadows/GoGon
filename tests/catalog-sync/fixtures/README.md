@@ -25,3 +25,7 @@ requests.
 `item-tooltip-quest.html` is the owner's follow-up response for item 17069, Twangy Core.
 Its compact table has a Quest type and usage/recipe notes, with no `item-tip` table class,
 rarity or equipment fields. It covers both the known-item probe and new item discovery.
+
+`item-tooltip-epic-weapon.html` is the owner's item 17070 (Twangy’s Axe) document, with whitespace
+formatted for readability and its helper stylesheet/analytics tags retained. It covers all twelve
+enhancements, stamina/XP bonuses, the equipment divider, and the actual 17069 → 17070 workflow.

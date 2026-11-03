@@ -157,6 +157,12 @@ came from, and every change it makes to the tables Discord reads can be rolled b
   Modern and compact tooltips share type/stat handling with the Guide extractor. Resources, quest
   items, potions, recipes, components, fragments and equipment need no rarity field. Missing fields
   remain unknown; usage, recipe, ingredient and component text is retained in item details.
+  Recent discoveries lists newly queued releases; the known-item validation probe is excluded.
+  The **Last response** line records the exact item ID and whether it was a known-item check or
+  exploration, plus HTTP status, response category, byte count and a specific parser rejection code.
+  This metadata survives restarts (migration 022); it contains no HTML, cookies or token-bearing
+  URLs. Failed reads also produce `[Catalog Items]` log lines. A browser's rendered item HTML may
+  differ from the worker's response, so use this line to identify the actual failing ID and phase.
 - **Seed (optional, recommended first).** *Stage fsdatabase* downloads the same snapshot `populate_db.mjs`
   uses and records it without touching the serving tables. Promote each part in order: *Preview promotion*
   shows the exact row changes, and you type the phrase it shows to apply it. Promoted parts can be rolled
@@ -191,6 +197,12 @@ came from, and every change it makes to the tables Discord reads can be rolled b
   interval controls when the worker takes its next batch; the Guide scan interval controls when a
   completed index scan becomes due again. Scan duration depends on page counts, incomplete data,
   configured module interval, and Guide availability; scans run serially without overlap.
+  The Guide table reports each kind's last scan result and last completed **index** scan; pending
+  or failed detail pages remain incomplete even when an index is checked. Detail counts update
+  through the dashboard state stream. A separate worker message shows the current challenge retry
+  time: failed browser renewal waits five minutes (including when no initial clearance exists),
+  while another challenge response after renewal uses the normal partial retry interval. A stored
+  challenged row is the last recorded result for that kind, not proof of a continuous site outage.
 
   If browser verification fails after a
   challenged request, the lease stops without moving the successful checkpoint and the worker retries

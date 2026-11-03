@@ -15,6 +15,7 @@ import { GUIDE_POLICY } from '../../catalog/contracts/policy.js';
 after(closeClients);
 const sample = readFileSync('tests/catalog-sync/fixtures/item-tooltip.html', 'utf8');
 const questSample = readFileSync('tests/catalog-sync/fixtures/item-tooltip-quest.html', 'utf8');
+const epicSample = readFileSync('tests/catalog-sync/fixtures/item-tooltip-epic-weapon.html', 'utf8');
 const hook = 'https://discord.com/api/webhooks/0/fixture-upcoming';
 const tooltip = id => sample.replaceAll('Cuirass of Encillious', `Discovered item ${id}`);
 const response = (body, status = 200, headers = {}) => new Response(body, { status, headers: { 'content-type': 'text/html', ...headers } });
@@ -33,11 +34,13 @@ async function setup({ budget = 50, baseline = 17069 } = {}) {
     if (baseline) await catalog.ingest({ mode: 'observe_realm', source: 'game_session', observations: [{ kind: 'item', payload: { id: baseline, name: 'Existing item' } }] });
     const store = createItemDiscoveryStore(db, catalog, { now });
     const calls = [], valid = new Set(baseline ? [baseline] : []);
-    const env = { webhook: hook, ready: true, intercept: null };
-    const makeWorker = () => createItemDiscovery({ store, now, getWebhook: () => env.webhook, sessionReady: () => env.ready,
+    const env = { webhook: hook, ready: true, intercept: null, logs: [] };
+    const makeWorker = () => createItemDiscovery({ store, now, getWebhook: () => env.webhook, sessionReady: () => env.ready, log: line => env.logs.push(line),
+        getHeaders: () => ({ 'user-agent': 'fixture UA', referer: 'https://www.fallensword.com/index.php' }),
         policy: { ...GAME_POLICY, maxRequestsPerExecution: budget }, queue: { run: fn => fn() },
         fetchFn: async (url, options) => {
             assert.equal(options.method, 'GET');
+            assert.equal(options.headers['user-agent'], 'fixture UA');
             const id = Number(new URL(url).searchParams.get('item_id'));
             calls.push(id);
             return await env.intercept?.(id, options) ?? response(valid.has(id) ? tooltip(id) : 'Invalid Request');
@@ -129,6 +132,63 @@ test('first-run compact Quest baseline no longer loops in backoff; mixed new ite
     const notifications = await db.query('SELECT event_id, payload FROM notification_outbox ORDER BY event_id');
     assert.deepEqual(notifications.map(row => row.event_id), ['17071', '17074']);
     assert.equal(JSON.parse(notifications[0].payload).embeds[0].description, 'Quest\nGuide verification pending.');
+});
+
+test('actual Quest 17069 probe and Epic 17070 scan persist, announce once, and list only new discoveries', async () => {
+    const { worker, env, db, store } = await setup();
+    env.intercept = id => id === 17069 ? response(questSample) : id === 17070 ? response(epicSample) : null;
+    const result = await worker.run();
+    assert.equal(result.status, 'complete');
+    assert.equal(result.announced, 1);
+    assert.equal(result.lastCheckedId, 17080);
+    const [item] = await db.query('SELECT name, stats, enhancements FROM items WHERE id = 17070');
+    assert.equal(item.name, 'Twangy’s Axe');
+    assert.equal(JSON.parse(item.stats).staminaGain, 9);
+    assert.equal(JSON.parse(item.enhancements).length, 12);
+    assert.deepEqual((await store.recent()).map(item => item.id), [17070], 'baseline probe stays out of Recent discoveries');
+    assert.equal((await db.query('SELECT * FROM notification_outbox')).length, 1);
+    await store.requestScan();
+    assert.equal((await worker.run()).announced, 0);
+    assert.deepEqual((await store.recent()).map(item => item.id), [17070]);
+});
+
+test('failures retain exact ID/phase/parser diagnostics across restart without persisting response contents', async () => {
+    const { worker, env, store, db, makeWorker } = await setup();
+    env.intercept = id => id === 17069 ? response(questSample) : response('<div>private-body-token</div>');
+    assert.equal((await worker.run()).reason, 'unrecognized_tooltip');
+    const state = await makeWorker().status();
+    assert.equal(state.lastRequest.itemId, 17070);
+    assert.equal(state.lastRequest.phase, 'scan');
+    assert.equal(state.lastRequest.parserCode, 'tooltip_table_missing');
+    assert.equal(state.lastRequest.httpStatus, 200);
+    assert.match(state.lastRequest.fingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(state.nextItemId, 17070);
+    assert.deepEqual(await store.recent(), []);
+    assert.match(env.logs[0], /ID 17070 \(scan\).*tooltip_table_missing/);
+    assert.doesNotMatch(JSON.stringify(state) + env.logs.join(''), /private-body-token/);
+    const { up } = await import('../../_gg_data/migrations/022_item_request_diagnostics.mjs');
+    await up(db); await up(db);
+    assert.deepEqual((await store.state()).lastRequest, state.lastRequest);
+    await assert.rejects(store.recordRequest(state.scanId, { ...state.lastRequest, body: 'must never persist' }), error => error.code === 'invalid');
+});
+
+test('game landing and HuntedCow account forms are login responses, never missing IDs or generic parser failures', async () => {
+    for (const page of ['<html><a id="outer-signup" href="https://huntedcow.com/auth?game=6">Create account</a></html>', '<html><form id="m-login-form"><input type="password"></form></html>']) {
+        const { worker, env, store } = await setup();
+        env.intercept = () => {
+            const result = response(page);
+            Object.defineProperty(result, 'url', { value: 'https://huntedcow.com/account?private=secret-query-value' });
+            return result;
+        };
+        assert.equal((await worker.run()).reason, 'login');
+        const state = await store.state();
+        assert.equal(state.lastRequest.itemId, 17069);
+        assert.equal(state.lastRequest.phase, 'probe');
+        assert.equal(state.lastRequest.route, 'huntedcow_page');
+        assert.doesNotMatch(JSON.stringify(state), /secret-query-value|https:/);
+        assert.equal(state.lastCheckedId, null);
+        assert.equal(state.nextItemId, 17070);
+    }
 });
 
 test('maintenance, auth, challenge, network and malformed replies preserve the cursor and use backoff', async () => {

@@ -7,14 +7,14 @@ const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
 
 /** A malformed tooltip is never interpreted as an unused ID. */
 export class ItemTooltipError extends Error {
-    constructor(message = 'Unrecognized item tooltip.') { super(message); this.name = 'ItemTooltipError'; }
+    constructor(message = 'Unrecognized item tooltip.', code = 'invalid_tooltip') { super(message); this.name = 'ItemTooltipError'; this.code = code; }
 }
 
 function numeric(value) {
     const normalized = value.replace(/,/g, '').replace(/\u2212/g, '-');
-    if (!/^[+-]?\d+(?:\.\d+)?%?$/.test(normalized)) throw new ItemTooltipError('Invalid item tooltip number.');
+    if (!/^[+-]?\d+(?:\.\d+)?%?$/.test(normalized)) throw new ItemTooltipError('Invalid item tooltip number.', 'invalid_number');
     const result = Number(normalized.replace(/%$/, ''));
-    if (!Number.isFinite(result) || Math.abs(result) > 1e12) throw new ItemTooltipError('Item tooltip number is out of range.');
+    if (!Number.isFinite(result) || Math.abs(result) > 1e12) throw new ItemTooltipError('Item tooltip number is out of range.', 'number_out_of_range');
     return result;
 }
 
@@ -22,15 +22,17 @@ function numeric(value) {
 // classes. Require its isolated table, named font header and type row so full login/error pages
 // cannot be mistaken for items. Keep descriptive rows without inventing equipment stats/rarity.
 function compactTooltip($, id) {
-    const roots = $('body').children();
-    if (roots.length !== 1 || !roots.is('table') || roots.find('table').length) throw new ItemTooltipError();
+    const content = $('body').children().not('script, link, style');
+    if (!content.filter('table').length) throw new ItemTooltipError('Item table is missing.', 'tooltip_table_missing');
+    if (content.length !== 1 || !content.is('table') || content.find('table').length) throw new ItemTooltipError('Ambiguous compact item document.', 'compact_layout_invalid');
+    const roots = content;
     const header = roots.find('tr').first().children('td');
     const blocks = header.children('center').children('div');
     const nameNode = blocks.first().find('nobr > font > b');
     const name = clean(nameNode.text());
     const typeText = clean(blocks.eq(1).text());
     const { type, rarity } = parseItemType(typeText);
-    if (header.length !== 1 || nameNode.length !== 1 || !name || name.length > 191 || !type || type.length > 64 || (rarity?.length ?? 0) > 64 || typeText.length > 131) throw new ItemTooltipError();
+    if (header.length !== 1 || nameNode.length !== 1 || !name || name.length > 191 || !type || type.length > 64 || (rarity?.length ?? 0) > 64 || typeText.length > 131) throw new ItemTooltipError('Invalid compact item header.', 'compact_header_invalid');
     const rows = roots.find('tr').toArray().slice(1).map(row => clean($(row).children('td').toArray().map(cell => $(cell).text()).join(' '))).filter(Boolean);
     const headerDetails = blocks.toArray().slice(2).map(block => clean($(block).text())).filter(Boolean);
     if (rows.length > 100 || rows.some(text => text.length > 8192) || headerDetails.length > 16 || headerDetails.some(text => text.length > 512)) throw new ItemTooltipError();
@@ -51,16 +53,16 @@ function compactTooltip($, id) {
  * @returns {{found: false}|{found: true, record: object}} Typed provisional item.
  */
 export function parseItemTooltip(html, id) {
-    if (!Number.isInteger(id) || id < 1 || id > MAX_TOOLTIP_ITEM_ID || typeof html !== 'string' || Buffer.byteLength(html) > MAX_RESPONSE_BYTES) throw new ItemTooltipError();
+    if (!Number.isInteger(id) || id < 1 || id > MAX_TOOLTIP_ITEM_ID || typeof html !== 'string' || Buffer.byteLength(html) > MAX_RESPONSE_BYTES) throw new ItemTooltipError('Invalid item input or size.', 'input_invalid');
     if (html.trim() === 'Invalid Request') return { found: false };
     const $ = load(html);
     const table = $('table.item-tip');
     if (table.length === 0) return compactTooltip($, id);
-    if (table.length !== 1) throw new ItemTooltipError();
+    if (table.length !== 1) throw new ItemTooltipError('Multiple item tables.', 'multiple_item_tables');
     const name = clean(table.find('.item-tip-name').text());
     const typeText = clean(table.find('.item-tip-type').first().text());
     const { type, rarity } = parseItemType(typeText);
-    if (!name || name.length > 191 || !type || type.length > 64 || (rarity?.length ?? 0) > 64 || typeText.length > 131) throw new ItemTooltipError();
+    if (!name || name.length > 191 || !type || type.length > 64 || (rarity?.length ?? 0) > 64 || typeText.length > 131) throw new ItemTooltipError('Invalid item header.', 'item_header_invalid');
     const record = { id, name, imageUrl: `https://cdn2.fallensword.com/items/${id}.gif`, stats: { type }, enhancements: [], details: { tooltipSections: [] } };
     if (rarity) record.rarity = rarity;
     const typeDetails = table.find('.item-tip-type').toArray().slice(1).map(element => clean($(element).text())).filter(Boolean);
@@ -97,7 +99,7 @@ export function parseItemTooltip(html, id) {
             }
             continue;
         }
-        if (!value || label.length > 191 || value.length > 512 || (section?.entries.length ?? 0) >= 100) throw new ItemTooltipError();
+        if (!value || label.length > 191 || value.length > 512 || (section?.entries.length ?? 0) >= 100) throw new ItemTooltipError('Invalid item row.', 'item_row_invalid');
         section?.entries.push({ label, value });
         if (!section) {
             record.details.otherFields ??= [];
@@ -116,7 +118,7 @@ export function parseItemTooltip(html, id) {
             record.enhancements.push({ name: label, value: number });
         } else if (/^Durability$/i.test(label)) {
             const durability = value.match(/^(\d+)\s*\/\s*(\d+)$/);
-            if (!durability || !durability.slice(1).every(part => Number.isSafeInteger(Number(part))) || Number(durability[1]) > Number(durability[2])) throw new ItemTooltipError();
+            if (!durability || !durability.slice(1).every(part => Number.isSafeInteger(Number(part))) || Number(durability[1]) > Number(durability[2])) throw new ItemTooltipError('Invalid item durability.', 'durability_invalid');
             record.details.durability = { current: Number(durability[1]), max: Number(durability[2]) };
         }
     }

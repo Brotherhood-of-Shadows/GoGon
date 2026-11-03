@@ -59,7 +59,7 @@ function cell(col, value, spec) {
  * @param {object} [deps.relay] - catalog/guideRelay.js (CAT-TASK-010): relay presence and tokens
  * @param {object} [deps.seeds] - catalog/seedService.js (CAT-TASK-007)
  */
-export function createCatalogService({ db, store, guideStore, collector = null, operations = readOperations(), now = Date.now, relay = null, seeds = null, itemDiscovery = null }) {
+export function createCatalogService({ db, store, guideStore, collector = null, operations = readOperations(), now = Date.now, relay = null, seeds = null, itemDiscovery = null, guideWorker = null }) {
     const relayLastSeenAt = async () => (relay ? relay.lastSeenAt() : null);
     const entityKey = (kind, row) => row.catalog_key ?? (SERVING[kind].natural ? `${row.realm_id}:${row.name}` : String(row.id));
 
@@ -185,6 +185,8 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
                 jobs: jobs.slice(0, 20).map(j => ({ ...j, lastResult: results[j.id] ?? null })),
                 ...(itemDiscovery ? { itemDiscovery: await itemDiscovery.status() } : {}),
                 guide: (await guideStore.listStates()).map(s => guideStatus(s, t, seen)),
+                coverage: await guideStore.coverage(),
+                ...(guideWorker ? { guideWorker: guideWorker.status() } : {}),
                 relayLastSeenAt: seen,
                 available: Object.fromEntries(['observe_realm', 'item_frontier', 'guide_discovery'].map(k => [k, unavailableReason(k, operations)])),
             };
@@ -209,7 +211,6 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
             return {
                 ...(await this.stateSummary()),
                 kinds,
-                coverage: await guideStore.coverage(),
                 guideRequestsToday: await guideStore.usage(),
                 relayTokens: relay ? await relay.listTokens() : [],
                 policy: { game: GAME_POLICY, guide: getGuidePolicy(), ordering: GUIDE_ORDERING, fullSweep: fullSweepEstimate() },

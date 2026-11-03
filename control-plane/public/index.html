@@ -157,6 +157,7 @@
         <p class="muted">The starting point defaults to the highest ID already in Catalog. Each daily pass rechecks the unused IDs after the last valid one. Moving the starting point does not resend earlier announcements.</p>
         <p id="item-discovery-status" role="status"></p>
         <div id="item-discovery-progress" class="stat-row"></div>
+        <p id="item-discovery-request" class="muted"></p>
         <h3>Recent discoveries</h3>
         <div class="table-wrap"><table>
           <thead><tr><th>ID</th><th>Item</th><th>First found</th><th></th></tr></thead>
@@ -169,9 +170,11 @@
         <p class="muted" id="guide-policy"></p>
         <p class="muted">Configure the Guide scan interval in Settings → Catalog. Enable CatalogSync on Modules and keep the guide_discovery job running.</p>
         <button type="button" id="guide-scan-now">Scan Guide now</button>
+        <p class="muted">Each row shows its last scan result. A completed index scan can still have pending or failed detail pages; it does not mean every entry is complete.</p>
+        <p id="guide-worker-status" class="muted"></p>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Kind</th><th>Status</th><th>Last complete check</th><th>Last seen ID</th><th>Sweep</th><th>Order</th><th>Details</th></tr></thead>
+            <thead><tr><th>Kind</th><th>Last scan result</th><th>Last complete index scan</th><th>Highest index ID</th><th>Sweep</th><th>Order</th><th>Details</th></tr></thead>
             <tbody id="guide-status"></tbody>
           </table>
         </div>

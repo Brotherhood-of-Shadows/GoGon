@@ -49,6 +49,7 @@ export function createGuideWorker({ relay, clearance, userAgent = DEFAULT_GUIDE_
     let seededDetailsScheduled = false;
     let activeCredentials = null;
     let suppliedConfiguration = null;
+    let running = false;
 
     async function readResponse(url, signal, credentials) {
         const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -73,7 +74,10 @@ export function createGuideWorker({ relay, clearance, userAgent = DEFAULT_GUIDE_
             try {
                 credentials = await renewClearance({ signal });
             } catch (error) {
-                if (error instanceof GuideClearanceError) console.warn('[Catalog] Guide browser verification did not complete.');
+                if (error instanceof GuideClearanceError) {
+                    console.warn('[Catalog] Guide browser verification did not complete.');
+                    onRenewalFailure();
+                }
                 throw error;
             }
             if (!validCredentials(credentials)) throw new GuideClearanceError('Guide browser returned invalid credentials.');
@@ -100,8 +104,9 @@ export function createGuideWorker({ relay, clearance, userAgent = DEFAULT_GUIDE_
         try {
             const summary = await relay.submit(workerId, lease.leaseId, { results, requests });
             pendingSubmission = null;
-            if (results.at(-1)?.outcome === 'challenge') {
+            if (renewalFailed || results.at(-1)?.outcome === 'challenge') {
                 lastChallenge = { configuration: currentConfiguration, at: now(),
+                    kind: lease.kind, reason: renewalFailed ? 'browser_verification_failed' : 'challenge_response',
                     retryAfterMs: renewalFailed ? RENEWAL_FAILURE_RETRY_MS : GUIDE_POLICY.partialRetryMs };
             }
             return { status: 'sent', kind: lease.kind, requests, results: results.length,
@@ -116,48 +121,60 @@ export function createGuideWorker({ relay, clearance, userAgent = DEFAULT_GUIDE_
     }
 
     return {
+        /** Safe current retry state, separate from each kind's last index/detail result.
+         * @returns {object} Worker cooldown without browser credentials.
+         */
+        status() {
+            const retryAt = lastChallenge ? lastChallenge.at + lastChallenge.retryAfterMs : null;
+            return { state: running ? 'running' : retryAt && retryAt > now() ? 'backoff' : 'ready', kind: lastChallenge?.kind ?? null,
+                reason: lastChallenge?.reason ?? null, nextRetryAt: retryAt ? new Date(retryAt).toISOString() : null };
+        },
         async run({ signal } = {}) {
-            const suppliedCredentials = { clearance: getClearance(), userAgent: getUserAgent() };
-            const configuration = `${suppliedCredentials.clearance}\n${suppliedCredentials.userAgent}`;
-            if (configuration !== suppliedConfiguration) {
-                activeCredentials = null;
-                suppliedConfiguration = configuration;
-            }
-            const currentCredentials = activeCredentials ?? suppliedCredentials;
-            if (!validCredentials(currentCredentials) && !renewClearance) {
-                return { status: suppliedCredentials.clearance ? 'invalid_configuration' : 'unconfigured' };
-            }
-            if (signal?.aborted) return { status: 'aborted' };
-            const currentConfiguration = `${currentCredentials.clearance}\n${currentCredentials.userAgent}`;
-            if (lastChallenge?.configuration === currentConfiguration
-                && now() - lastChallenge.at < lastChallenge.retryAfterMs) return { status: 'challenged' };
-            lastChallenge = null;
+            if (running) return { status: 'busy' };
+            running = true;
+            try {
+                const suppliedCredentials = { clearance: getClearance(), userAgent: getUserAgent() };
+                const configuration = `${suppliedCredentials.clearance}\n${suppliedCredentials.userAgent}`;
+                if (configuration !== suppliedConfiguration) {
+                    activeCredentials = null;
+                    suppliedConfiguration = configuration;
+                }
+                const currentCredentials = activeCredentials ?? suppliedCredentials;
+                if (!validCredentials(currentCredentials) && !renewClearance) {
+                    return { status: suppliedCredentials.clearance ? 'invalid_configuration' : 'unconfigured' };
+                }
+                if (signal?.aborted) return { status: 'aborted' };
+                const currentConfiguration = `${currentCredentials.clearance}\n${currentCredentials.userAgent}`;
+                if (lastChallenge?.configuration === currentConfiguration
+                    && now() - lastChallenge.at < lastChallenge.retryAfterMs) return { status: 'challenged' };
+                lastChallenge = null;
 
-            if (!seededDetailsScheduled) {
-                await relay.scheduleSeededDetails();
-                seededDetailsScheduled = true;
-            }
-            const workerId = await relay.ensureServerWorker();
-            if (pendingSubmission) {
-                if (now() >= Date.parse(pendingSubmission.lease.expiresAt)) pendingSubmission = null;
-                else return submitPending(workerId, currentConfiguration);
-            }
-            const next = await relay.nextLease(workerId);
-            if (next.status !== 'lease') return { status: next.status };
+                if (!seededDetailsScheduled) {
+                    await relay.scheduleSeededDetails();
+                    seededDetailsScheduled = true;
+                }
+                const workerId = await relay.ensureServerWorker();
+                if (pendingSubmission) {
+                    if (now() >= Date.parse(pendingSubmission.lease.expiresAt)) pendingSubmission = null;
+                    else return await submitPending(workerId, currentConfiguration);
+                }
+                const next = await relay.nextLease(workerId);
+                if (next.status !== 'lease') return { status: next.status };
 
-            let requests = 0;
-            let renewalFailed = false;
-            const results = await runLease(next.lease, {
-                fetchPage: url => fetchPage(url, signal, suppliedCredentials, () => { renewalFailed = true; }),
-                parseHtml,
-                sleep: ms => sleep(ms, undefined, { signal }),
-                stopped: () => Boolean(signal?.aborted),
-                now,
-                onRequest: () => { requests++; },
-            });
-            pendingSubmission = { lease: next.lease, results, requests, renewalFailed };
-            const submittedCredentials = activeCredentials ?? suppliedCredentials;
-            return submitPending(workerId, `${submittedCredentials.clearance}\n${submittedCredentials.userAgent}`);
+                let requests = 0;
+                let renewalFailed = false;
+                const results = await runLease(next.lease, {
+                    fetchPage: url => fetchPage(url, signal, suppliedCredentials, () => { renewalFailed = true; }),
+                    parseHtml,
+                    sleep: ms => sleep(ms, undefined, { signal }),
+                    stopped: () => Boolean(signal?.aborted),
+                    now,
+                    onRequest: () => { requests++; },
+                });
+                pendingSubmission = { lease: next.lease, results, requests, renewalFailed };
+                const submittedCredentials = activeCredentials ?? suppliedCredentials;
+                return await submitPending(workerId, `${submittedCredentials.clearance}\n${submittedCredentials.userAgent}`);
+            } finally { running = false; }
         },
     };
 }

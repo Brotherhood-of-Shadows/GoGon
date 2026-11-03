@@ -109,7 +109,7 @@
         /Attention Required! \| Cloudflare/i,
     ];
     // The game's login page (the same signature utils.js secureFetch uses).
-    const LOGIN_MARKER = /\bid\s*=\s*["']hc-account-link["']/i;
+    const LOGIN_MARKER = /\bid\s*=\s*["'](?:hc-account-link|m-login-form|outer-signup)["']/i;
 
     /**
      * @param {object} res

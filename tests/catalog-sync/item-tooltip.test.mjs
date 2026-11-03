@@ -8,6 +8,25 @@ import { parseHTML } from 'linkedom';
 
 const html = readFileSync('tests/catalog-sync/fixtures/item-tooltip.html', 'utf8');
 const quest = readFileSync('tests/catalog-sync/fixtures/item-tooltip-quest.html', 'utf8');
+const epic = readFileSync('tests/catalog-sync/fixtures/item-tooltip-epic-weapon.html', 'utf8');
+
+test('owner 17070 Twangy’s Axe parses its actual equipment HTML, full document and helper-injected tags', () => {
+    const { found, record } = parseItemTooltip(epic, 17070);
+    assert.equal(found, true);
+    assert.equal(record.name, 'Twangy’s Axe');
+    assert.equal(record.rarity, 'Epic');
+    assert.deepEqual(record.stats, { type: 'Weapon', attack: 16940, damage: 7260, stamina: 400, staminaGain: 9, xpGain: 8, level: 6000 });
+    assert.equal(record.enhancements.length, 12);
+    assert.ok(record.enhancements.every(enhancement => enhancement.value === 100));
+    assert.deepEqual(record.details.durability, { current: 160, max: 160 });
+    assert.equal(itemReleaseMessage(record, '2026-11-03T00:00:00.000Z').embeds[0].title, 'New item discovered: Twangy’s Axe');
+});
+
+test('compact tooltips accept the same harmless trailing helper tags as equipment without executing scripts', () => {
+    const wrapper = `<html><body>${quest}<link rel="stylesheet" href="https://example.invalid/a.css"><script>throw new Error('must never execute')</script></body></html>`;
+    assert.deepEqual(parseItemTooltip(wrapper, 17069), parseItemTooltip(quest, 17069));
+    assert.throws(() => parseItemTooltip(`<main>Please sign in</main>${wrapper}`, 17069), error => error.code === 'compact_layout_invalid');
+});
 
 test('owner Twangy Core compact tooltip preserves Quest type and usage without inventing rarity or equipment fields', () => {
     const { found, record } = parseItemTooltip(quest, 17069);

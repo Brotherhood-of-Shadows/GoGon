@@ -553,6 +553,7 @@ const ITEM_DISCOVERY_ERRORS = {
     unrecognized_tooltip: 'The item response was not recognized. The cursor has been kept for retry.',
     challenge: 'The game returned a browser challenge. Waiting before retrying.',
     storage_error: 'The database checkpoint failed. The item and announcement will be retried together.',
+    login: 'The game returned a login page instead of an item. The ID has been kept for retry.',
 };
 
 function renderItemDiscoveryState(data) {
@@ -565,6 +566,10 @@ function renderItemDiscoveryState(data) {
         ['New discoveries', data.discoveredTotal], ['Last complete scan', fmtTime(data.lastCompletedAt)], ['Next check', fmtTime(data.nextCheckAt)],
     ].map(([label, value]) => el('span', { class: 'stat' }, `${label}: ${value}`)));
     document.getElementById('item-discovery-run').disabled = !data.enabled || !data.webhookConfigured || !data.recommendedStartId;
+    const request = data.lastRequest;
+    document.getElementById('item-discovery-request').textContent = request
+        ? `Last response: item ${request.itemId} (${request.phase === 'probe' ? 'known-item check' : 'scan'}), ${fmtTime(request.at)}; ${request.outcome}; HTTP ${request.httpStatus ?? '-'}; ${request.route}; ${request.contentType ?? '-'}; ${request.bytes ?? '-'} bytes${request.parserCode ? `; parser: ${request.parserCode}` : ''}.`
+        : 'No request details recorded yet.';
     const changed = itemDiscoveryTotal !== null && itemDiscoveryTotal !== data.discoveredTotal;
     itemDiscoveryTotal = data.discoveredTotal;
     if (changed && !document.getElementById('catalog-upcoming').hidden) loadItemDiscovery();
@@ -687,15 +692,19 @@ function renderCatalogState() {
     const c = state?.catalog;
     if (!c) return;
     renderItemDiscoveryState(c.itemDiscovery);
+    const worker = c.guideWorker;
+    document.getElementById('guide-worker-status').textContent = worker?.state === 'running' ? 'Guide worker is processing a batch.' : worker?.state === 'backoff'
+        ? `Guide worker waiting until ${fmtTime(worker.nextRetryAt)} after ${worker.reason === 'browser_verification_failed' ? 'browser verification failed' : 'a challenge response'} (${worker.kind}). Saved progress is retained.`
+        : worker ? 'Guide worker ready for its next scheduled batch.' : '';
     document.getElementById('guide-status').replaceChildren(...c.guide.map(g => el('tr', {},
         el('td', {}, g.entityKind),
-        el('td', {}, el('span', { class: `pill ${GUIDE_STATUS_CLASS[g.display] ?? ''}` }, g.display.replace(/_/g, ' ')), g.statusReason ? el('span', { class: 'muted' }, ` ${g.statusReason}`) : null,
+        el('td', {}, el('span', { class: `pill ${GUIDE_STATUS_CLASS[g.display] ?? ''}` }, g.display === 'ok' ? 'index checked' : g.display.replace(/_/g, ' ')), g.statusReason ? el('span', { class: 'muted' }, ` ${g.statusReason}`) : null,
             g.overdue ? el('span', { class: 'error' }, ' overdue') : null),
         el('td', {}, fmtTime(g.lastSuccessfulCheckAt)),
         el('td', {}, String(g.lastSeenId || '-')),
         el('td', {}, g.sweepMode ? `${g.sweepMode}: next page ${g.nextPage}, ${g.sweepPagesChecked} checked` : '-'),
         el('td', {}, g.orderState),
-        el('td', {}, catalogView.summary ? (() => { const k = catalogView.summary.coverage[g.entityKind]; return `${k.ok} read, ${k.pending} pending, ${k.failed} failed`; })() : '-'))));
+        el('td', {}, (() => { const k = (c.coverage ?? catalogView.summary?.coverage)?.[g.entityKind]; return k ? `${k.ok} read, ${k.pending} pending, ${k.failed} failed` : '-'; })()))));
 
     document.getElementById('catalog-jobs').replaceChildren(...c.jobs.map(j => {
         const actions = el('td', { class: 'actions' });
