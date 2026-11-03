@@ -29,3 +29,38 @@ test('SSO clearance rejects malformed and non-HuntedCow credentials without leak
     throw new Error('private-cookie-value');
   } }), error => error instanceof SsoClearanceError && !error.message.includes('private-cookie-value'));
 });
+
+test('SSO browser failures identify safe actionable reasons without exposing cookies or subprocess output', async () => {
+  const secret = 'private-cookie-or-proxy-value';
+  const failures = [
+    [{ code: 'ENOENT' }, 'SSO_LAUNCHER_MISSING'],
+    [{ code: 1, stderr: 'FileNotFoundError: Chromium is unavailable' }, 'SSO_CHROMIUM_MISSING'],
+    [{ code: 1, stderr: "ModuleNotFoundError: No module named 'nodriver'" }, 'SSO_BROWSER_DEPENDENCY_MISSING'],
+    [{ code: 1, stderr: 'xvfb-run: error: Xvfb failed to start' }, 'SSO_DISPLAY_FAILED'],
+    [{ code: 1, stderr: 'TimeoutError: Verification checkbox did not appear' }, 'SSO_CHECKBOX_MISSING'],
+    [{ code: 1, stderr: 'TimeoutError: HuntedCow verification did not reach the account form' }, 'SSO_ACCOUNT_PAGE_TIMEOUT'],
+    [{ code: 1, stderr: 'ValueError: HuntedCow verification produced no usable clearance' }, 'SSO_CLEARANCE_MISSING'],
+    [{ code: 1, stderr: 'GG_GUIDE_BROWSER_PROXY must be a local SOCKS5 endpoint' }, 'SSO_PROXY_INVALID'],
+    [{ code: 1, stderr: 'FileNotFoundError: Challenge image is unavailable' }, 'SSO_CHALLENGE_IMAGE_MISSING'],
+    [{ code: 1, stderr: 'cv2.error: invalid screenshot' }, 'SSO_VERIFICATION_IMAGE_FAILED'],
+    [{ code: 127, stderr: '/usr/bin/xvfb-run: /opt/gogon-guide-python/bin/python: not found' }, 'SSO_PYTHON_MISSING'],
+    [{ code: 1, stderr: 'asyncio.exceptions.TimeoutError' }, 'SSO_BROWSER_TIMEOUT'],
+    [{ killed: true, signal: 'SIGTERM' }, 'SSO_PROCESS_TIMEOUT'],
+    [{ code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' }, 'SSO_OUTPUT_LIMIT'],
+    [{ signal: 'SIGKILL' }, 'SSO_BROWSER_TERMINATED'],
+    [{ name: 'AbortError' }, 'SSO_CANCELLED'],
+    [{ code: 1 }, 'SSO_HELPER_FAILED'],
+    [{}, 'SSO_HELPER_FAILED'],
+  ];
+  for (const [failure, code] of failures) {
+    const childError = Object.assign(new Error(secret), failure, { stdout: secret, stderr: `${failure.stderr ?? ''}\n${secret}` });
+    await assert.rejects(renewSsoClearance({ execFileFn: async () => { throw childError; } }), error => {
+      assert.equal(error.code, code);
+      assert.ok(error instanceof SsoClearanceError);
+      assert.match(error.message, /HuntedCow browser verification did not complete/);
+      assert.doesNotMatch(`${error.stack} ${JSON.stringify(error)}`, new RegExp(secret));
+      assert.equal(error.cause, undefined);
+      return true;
+    }, code);
+  }
+});
