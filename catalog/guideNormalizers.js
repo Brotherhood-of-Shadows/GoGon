@@ -78,7 +78,7 @@ export function validManualRecord(kind, record) {
 
 const manualShape = kind => ({ ...RECORD_SCHEMAS[kind]?.shape,
     ...(kind === 'realm' ? { masterRealmId: S.opt(S.id), mapObjects: () => true } : {}),
-    ...(kind === 'relic' || kind === 'quest' ? { details: () => true } : {}),
+    ...(['item', 'relic', 'quest'].includes(kind) ? { details: () => true } : {}),
 });
 
 /** Validates a patch without requiring unchanged fields or allowing identity-ID changes.
@@ -162,6 +162,7 @@ export function mapGuideRecord(kind, record) {
         observations.push({ kind: 'item', payload: compact({
             id: record.id, name: record.name, rarity: record.rarity, imageUrl: record.imageUrl, stats: record.stats,
             enhancements: record.enhancements, droppedBy: record.droppedBy, setId: record.setId, setName: record.setName, setBonuses: record.setBonuses,
+            details: record.details,
         }) });
     } else if (kind === 'creature') {
         observations.push({ kind: 'creature', payload: compact({

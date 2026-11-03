@@ -240,6 +240,7 @@ export function createControlPlane({ config, store, engine, switcher, rebind = a
         try {
             if (p === '/api/catalog/manual-fields') { queryOnly(url, []); return send(res, 200, { kinds: svc.manualFields() }); }
             if (p === '/api/catalog/summary') { queryOnly(url, []); return send(res, 200, await svc.summary()); }
+            if (p === '/api/catalog/item-discovery') { queryOnly(url, []); return send(res, 200, await svc.itemDiscoveryStatus()); }
             if ((match = p.match(/^\/api\/catalog\/entities\/([a-z_]{1,16})\/([^/]{1,600})\/edit$/))) {
                 queryOnly(url, []);
                 return send(res, 200, await svc.getEditingRecord(match[1], decodeURIComponent(match[2])));
@@ -271,6 +272,20 @@ export function createControlPlane({ config, store, engine, switcher, rebind = a
         let match;
         const audit = (action, subject, outcome = 'success', detail = null) => store.audit({ actor, action, subject: String(subject).slice(0, 100), outcome, detail });
         try {
+            if (p === '/api/catalog/item-discovery' || p === '/api/catalog/item-discovery/run') {
+                const body = await readJson(req);
+                allowOnly(body, p.endsWith('/run') ? [] : ['enabled', 'startAfterId']);
+                try {
+                    if (p.endsWith('/run')) await svc.requestItemDiscovery();
+                    else await svc.configureItemDiscovery(body);
+                    await audit(p.endsWith('/run') ? 'catalog.items.scan' : 'catalog.items.configure', 'items');
+                    broadcastSoon();
+                    return send(res, 200, { ok: true, ...(p.endsWith('/run') ? {} : { state: await svc.itemDiscoveryStatus() }) });
+                } catch (e) {
+                    if (e instanceof CatalogError) await audit('catalog.items.configure', 'items', 'denied', { reason: e.code });
+                    throw e;
+                }
+            }
             if ((match = p.match(/^\/api\/catalog\/entities\/([a-z_]{1,16})\/([^/]{1,600})\/edit$/))) {
                 const body = await readJson(req);
                 allowOnly(body, ['record', 'version', 'fieldStates']);

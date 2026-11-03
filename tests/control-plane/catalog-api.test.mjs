@@ -9,6 +9,8 @@ import { freshClient, closeClients } from '../helpers/db-client.mjs';
 import { createControlStore } from '../../_gg_data/handler/controlStore.js';
 import { createCatalogStore } from '../../_gg_data/handler/catalogStore.js';
 import { createGuideDiscoveryStore } from '../../_gg_data/handler/guideDiscoveryStore.js';
+import { createItemDiscoveryStore } from '../../_gg_data/handler/itemDiscoveryStore.js';
+import { createItemDiscovery } from '../../catalog/itemDiscovery.js';
 import { createCatalogService } from '../../catalog/catalogService.js';
 import { createSeedService } from '../../catalog/seedService.js';
 import { SEED_SOURCES } from '../../catalog/sourceRegistry.js';
@@ -33,7 +35,9 @@ before(async () => {
     const seeds = createSeedService({ db, store: catalogStore, fetchJson: async url => seedData[Object.keys(SEED_SOURCES.fsdatabase.files).find(k => SEED_SOURCES.fsdatabase.files[k] === url)] });
     const guideStore = createGuideDiscoveryStore(db, { now });
     const relay = createGuideRelay({ db, store: catalogStore, guideStore, now });
-    const service = createCatalogService({ db, store: catalogStore, guideStore, now, seeds, relay });
+    const itemDiscovery = createItemDiscovery({ store: createItemDiscoveryStore(db, catalogStore, { now }), now,
+        fetchFn: async () => { throw new Error('Network work must stay in CatalogSync.'); }, getWebhook: () => 'fixture-configured' });
+    const service = createCatalogService({ db, store: catalogStore, guideStore, now, seeds, relay, itemDiscovery });
     const engine = { engineEvents: new EventEmitter(), isPaused: () => paused, listModuleIds: () => [], getTasksStatus: () => [] };
     const switcher = { events: new EventEmitter(), status: () => ({ state: 'idle', activeLabel: null, lastError: null }) };
     const config = { username: ADMIN, passwordHash: hashPassword(PASSWORD), sessionSecret: 'y'.repeat(48), host: '127.0.0.1', port: 0, cookieSecure: false };
@@ -69,6 +73,28 @@ async function session() {
     return { cookie, csrf: fetchCookie.csrf };
 }
 const lastAudit = async () => (await controlStore.listAudit(1))[0];
+
+test('item releases API requires owner and CSRF, validates controls, queues scans, and exposes no webhook secrets', async () => {
+    assert.equal((await req('GET', '/api/catalog/item-discovery')).status, 401);
+    const auth = await session();
+    assert.equal((await req('POST', '/api/catalog/item-discovery', { cookie: auth.cookie, body: { enabled: true } })).status, 403);
+    for (const body of [{ startAfterId: '17069' }, { startAfterId: -1 }, { enabled: 'true' }, { webhook: 'not-permitted' }]) {
+        assert.equal((await req('POST', '/api/catalog/item-discovery', { ...auth, body })).status, 400);
+    }
+    let result = await req('POST', '/api/catalog/item-discovery', { ...auth, body: { enabled: true, startAfterId: 17069 } });
+    assert.equal(result.status, 200);
+    assert.equal(result.json.state.lastValidId, 17069);
+    result = await req('GET', '/api/catalog/item-discovery', auth);
+    assert.equal(result.json.webhookConfigured, true);
+    assert.equal(result.json.lookahead, 10);
+    assert.doesNotMatch(result.text, /fixture-configured/);
+    assert.deepEqual(result.json.recent, []);
+    assert.equal((await req('POST', '/api/catalog/item-discovery/run', { ...auth, body: {} })).status, 200);
+    assert.equal((await lastAudit()).action, 'catalog.items.scan');
+    await req('POST', '/api/catalog/item-discovery', { ...auth, body: { enabled: false } });
+    assert.equal((await req('POST', '/api/catalog/item-discovery/run', { ...auth, body: {} })).status, 409);
+    await req('POST', '/api/catalog/item-discovery', { ...auth, body: { enabled: true } });
+});
 
 async function seed() {
     await catalogStore.ingest({ mode: 'seed', source: 'guide_baseline', observations: [

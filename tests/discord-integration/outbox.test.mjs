@@ -83,6 +83,27 @@ function scripted({ now = () => clock, ...over } = {}) {
 }
 let clock = Date.now() + 3600_000; // ahead of real time, so rows claimed during the run are due
 
+test('global item release notifications follow the active account while private alerts remain isolated', async () => {
+    await claim(17070, { source: 'catalog_upcoming', accountScope: 'global' });
+    await claim(17071, { accountScope: 'profile:old' });
+    setAccountScope('profile:new');
+    assert.equal((await store.dueSummary({ accountScope: 'profile:new', now: new Date(clock).toISOString() })).due, 1);
+    const attention = await store.listAttention({ activeScope: 'profile:new' });
+    assert.equal(attention.length, 1);
+    assert.equal(attention[0].accountScope, 'profile:old');
+    const { dispatcher, queued } = scripted();
+    await dispatcher.start();
+    dispatcher.stop();
+    assert.equal(queued.length, 1);
+    assert.equal(queued[0].meta.accountScope, 'profile:new');
+    assert.deepEqual(queued[0].body, payload(17070));
+    queued[0].meta.onSettled({ ok: true, batchSize: 1 });
+    await flush();
+    const all = await rows();
+    assert.equal(all.find(row => row.account_scope === 'global').state, 'delivered');
+    assert.equal(all.find(row => row.account_scope === 'profile:old').state, 'pending');
+});
+
 // --- AC-1: atomic claim ------------------------------------------------------------------------------
 
 test('AC-1: a claim commits the dedupe ID and one pending row; a repeated claim adds nothing', async () => {

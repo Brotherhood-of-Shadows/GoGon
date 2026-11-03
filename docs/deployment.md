@@ -127,6 +127,23 @@ came from, and every change it makes to the tables Discord reads can be rolled b
 - **Browse.** Search by kind and name. Each item and creature shows `complete` or `incomplete` with
   the reasons. Complete means its guide page was read and every drop it lists is in the catalog. It
   never means no other drop exists.
+- **Item releases.** Save a Discord webhook for `#upcoming` in Settings → Webhooks → **Upcoming
+  items (#upcoming)** (`GG_UPCOMING_WEBHOOK`), enable *CatalogSync* in Modules, and open Catalog →
+  *Item releases*. Discovery starts after the highest catalog item ID unless you choose a starting
+  ID. **Scan now** schedules a batch on the next CatalogSync tick; subsequent completed passes are
+  due every 24 hours. It reads the game's `fetchitem.php` tooltips serially, three seconds apart,
+  in batches of at most 50 requests. Gaps do not stop the scan: it continues through the last valid
+  item ID plus ten, extending that boundary for each discovery. The next daily pass revisits the
+  previously empty IDs after the last valid item. Progress survives restarts.
+
+  Names, types, rarity, bonuses, enhancements, level, durability, set pieces and image URLs enter
+  Catalog provisionally as **Incomplete**. Later Guide details can complete them; protected owner
+  fields retain their values. Each new ID queues a Discord embed containing the collected data and
+  item image in the same transaction as its catalog entry and cursor. Saved discovery IDs prevent
+  repeated announcements on rewinds, after delivered notifications are pruned, or after account
+  changes. Discord retries use the existing Notifications outbox. Transient errors, unknown HTML,
+  login pages and challenges preserve progress; only a successful `Invalid Request` response means
+  an unused ID. Known-item checks before and after a pass detect game maintenance.
 - **Seed (optional, recommended first).** *Stage fsdatabase* downloads the same snapshot `populate_db.mjs`
   uses and records it without touching the serving tables. Promote each part in order: *Preview promotion*
   shows the exact row changes, and you type the phrase it shows to apply it. Promoted parts can be rolled
@@ -171,8 +188,9 @@ came from, and every change it makes to the tables Discord reads can be rolled b
   scheduled server reader does not need an extension or a relay token.
   Manual relays should use the regenerated userscript version 1.0.3 for relic/quest detail support.
 - **Game jobs.** `observe_realm` needs one captured `fetchLocation` response before it can be enabled
-  (DEC-CAT-019), so it is shown disabled with that reason. `item_frontier` needs a game item-detail read,
-  which does not exist yet. The *CatalogSync* module on the Modules tab is off by default.
+  (DEC-CAT-019), so it is shown disabled with that reason. The legacy JSON `item_frontier` job remains
+  unverified; daily *Item releases* uses the owner-supplied HTML tooltip contract independently.
+  The *CatalogSync* module on the Modules tab is off by default.
 - **History & delete.** Every run can be previewed for rollback. The preview is valid for 10 minutes,
   can be used once, and needs its exact phrase. Rollback restores the previous values, or removes rows
   the run created. Rolling back a guide run marks the guide details it read as unverified; the relay

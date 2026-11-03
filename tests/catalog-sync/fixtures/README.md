@@ -13,3 +13,11 @@ Cloudflare interstitial markers, the game login signature `utils.js` already che
 No `fetchLocation` (game current-location) fixture exists: that response has never been captured,
 so `catalog/contracts/gameLocation.js` stays unverified and observe_realm is refused (owner decision
 2026-09-28). A captured fixture must strip player names, IDs, coordinates, and any account data.
+
+## Item discovery tooltip
+
+`item-tooltip.html` is the owner-provided `fetchitem.php?item_id=17060&inv_id=-1&t=0&extra=0`
+response (Cuirass of Encillious), formatted for readability. The owner also supplied the exact
+negative response `Invalid Request`. These attest the dedicated HTML Item releases reader;
+they do not attest the legacy JSON game frontier. Tests use fixtures and block live game/Discord
+requests.

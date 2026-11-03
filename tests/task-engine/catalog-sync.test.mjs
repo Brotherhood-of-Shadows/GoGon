@@ -93,6 +93,24 @@ test('CatalogSync runs the configured server guide worker under the catalog lock
     assert.deepEqual(result.guide, { status: 'sent', kind: 'item', requests: 1, results: 1 });
 });
 
+test('daily item discovery shares the catalog lock and cancellation before Guide work', async () => {
+    const service = fakeService([]);
+    const controller = new AbortController();
+    service.itemDiscovery = { async run({ signal }) {
+        assert.equal(isCatalogBusy(), true);
+        assert.equal(signal, controller.signal);
+        assert.deepEqual(await runCatalogSync({}), { skipped: 'busy' });
+        controller.abort();
+        return { status: 'aborted' };
+    } };
+    service.guideWorker = { async run() { assert.fail('Guide work must stop after cancellation.'); } };
+    configureCatalogTask(service);
+    const result = await runCatalogSync({ signal: controller.signal });
+    assert.equal(result.items.status, 'aborted');
+    assert.equal(result.guide, undefined);
+    assert.equal(isCatalogBusy(), false);
+});
+
 test('CAT-TASK-004: jobs a crash left running are handed back once, then run', async () => {
     const jobs = [{ id: 'x', kind: 'observe_realm', state: 'running' }];
     const svc = fakeService(jobs);

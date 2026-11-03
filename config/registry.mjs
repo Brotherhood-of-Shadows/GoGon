@@ -144,6 +144,7 @@ export const CONFIG_DEFINITIONS = Object.freeze([
     webhook('GG_SUPER_ELITE_WEBHOOK', 'Super Elites', ['SuperElites']),
     webhook('GG_CRATES_WEBHOOK', 'Crates', ['Crates']),
     webhook('GG_NEWS_WEBHOOK', 'Game updates', ['GameUpdates']),
+    webhook('GG_UPCOMING_WEBHOOK', 'Upcoming items (#upcoming)', ['CatalogSync']),
     webhook('GG_SHOUTBOX_WEBHOOK', 'Shoutbox', ['Shoutbox']),
     webhook('GG_GUILD_MESSAGE_WEBHOOK', 'Guild messages', ['GuildMessages']),
 

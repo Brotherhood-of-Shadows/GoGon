@@ -92,6 +92,7 @@
       <nav class="subtabs" aria-label="Catalog views">
         <button type="button" data-subtab="browse" class="active">Browse</button>
         <button type="button" data-subtab="manual">Add manually</button>
+        <button type="button" data-subtab="upcoming">Item releases</button>
         <button type="button" data-subtab="sync">Sync</button>
         <button type="button" data-subtab="seed">Seed</button>
         <button type="button" data-subtab="history">History &amp; delete</button>
@@ -138,6 +139,29 @@
           <button type="submit" id="manual-entry-save">Add incomplete entry</button>
           <button type="button" class="ghost" id="manual-entry-cancel" hidden>Cancel editing</button>
         </form>
+      </div>
+
+      <div id="catalog-upcoming" class="subtab" hidden>
+        <h3>Upcoming items</h3>
+        <p class="muted">Check game item tooltips daily, including gaps, until ten IDs beyond the newest valid item have been checked. New discoveries go into Catalog as incomplete and are announced once in #upcoming.</p>
+        <p class="muted">Create a Discord webhook in #upcoming and save it under Settings → Webhooks → Upcoming items (#upcoming). Enable CatalogSync in Modules. Requests use the existing game session and run in small, rate-limited batches.</p>
+        <form id="item-discovery-form" class="card toolbar" autocomplete="off">
+          <label><input type="checkbox" id="id-enabled"> Enable daily item discovery</label>
+          <label for="id-start">Start after item ID</label>
+          <input type="number" id="id-start" min="1" max="10000000" step="1" class="interval">
+          <button type="submit">Save</button>
+          <button type="button" id="item-discovery-run">Scan now</button>
+          <button type="button" class="ghost" id="item-discovery-refresh">Refresh</button>
+          <p class="error field-error" role="alert" hidden></p>
+        </form>
+        <p class="muted">The starting point defaults to the highest ID already in Catalog. Each daily pass rechecks the unused IDs after the last valid one. Moving the starting point does not resend earlier announcements.</p>
+        <p id="item-discovery-status" role="status"></p>
+        <div id="item-discovery-progress" class="stat-row"></div>
+        <h3>Recent discoveries</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>ID</th><th>Item</th><th>First found</th><th></th></tr></thead>
+          <tbody id="item-discovery-recent"></tbody>
+        </table></div>
       </div>
 
       <div id="catalog-sync" class="subtab" hidden>

@@ -53,7 +53,7 @@ export function createNotificationOutboxStore(db) {
         async listDue({ accountScope, now = nowIso(), limit = 50, excludeIds = new Set() }) {
             const rows = await db.query(
                 "SELECT id, source, event_id AS eventId, part, setting_key AS settingKey, payload, attempts FROM notification_outbox "
-                + "WHERE state = 'pending' AND account_scope = ? AND next_attempt_at <= ? ORDER BY id LIMIT ?",
+                + "WHERE state = 'pending' AND account_scope IN (?, 'global') AND next_attempt_at <= ? ORDER BY id LIMIT ?",
                 [accountScope, now, limit + excludeIds.size]);
             return rows.filter(r => !excludeIds.has(Number(r.id))).slice(0, limit).map(r => ({
                 ...r, id: Number(r.id), attempts: Number(r.attempts), payload: JSON.parse(r.payload),
@@ -90,7 +90,7 @@ export function createNotificationOutboxStore(db) {
             const ids = [...excludeIds];
             const [row] = await db.query(
                 "SELECT COUNT(*) AS n, MIN(next_attempt_at) AS dueSince FROM notification_outbox "
-                + "WHERE state = 'pending' AND account_scope = ? AND next_attempt_at <= ?"
+                + "WHERE state = 'pending' AND account_scope IN (?, 'global') AND next_attempt_at <= ?"
                 + (ids.length ? ` AND id NOT IN (${ids.map(() => '?').join(', ')})` : ''),
                 [accountScope, now, ...ids]);
             return { due: Number(row?.n ?? 0), dueSince: row?.dueSince ?? null };
@@ -106,7 +106,7 @@ export function createNotificationOutboxStore(db) {
         async listAttention({ activeScope, limit = 100 }) {
             return db.query(
                 `SELECT ${VIEW_COLUMNS} FROM notification_outbox `
-                + "WHERE state = 'failed' OR (state = 'pending' AND (attempts > 0 OR account_scope <> ?)) ORDER BY id DESC LIMIT ?",
+                + "WHERE state = 'failed' OR (state = 'pending' AND (attempts > 0 OR (account_scope <> ? AND account_scope <> 'global'))) ORDER BY id DESC LIMIT ?",
                 [activeScope ?? '', limit]);
         },
 

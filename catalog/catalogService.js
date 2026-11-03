@@ -18,7 +18,7 @@ export const MAX_PAGE = 10_000;
 
 // Serving columns each kind may return. JSON columns are parsed and size-bounded on the way out.
 const SERVING = {
-    item: { table: 'items', list: ['id', 'name', 'rarity', 'imageUrl'], detail: ['id', 'name', 'rarity', 'imageUrl', 'stats', 'enhancements', 'droppedBy', 'setBonuses', 'setId', 'setName'], json: ['stats', 'enhancements', 'droppedBy', 'setBonuses'] },
+    item: { table: 'items', list: ['id', 'name', 'rarity', 'imageUrl'], detail: ['id', 'name', 'rarity', 'imageUrl', 'stats', 'enhancements', 'droppedBy', 'setBonuses', 'setId', 'setName', 'details'], json: ['stats', 'enhancements', 'droppedBy', 'setBonuses', 'details'] },
     creature: { table: 'creatures', list: ['id', 'name', 'imageUrl'], detail: ['id', 'name', 'imageUrl', 'description', 'stats', 'enhancements', 'droppedItems'], json: ['stats', 'enhancements', 'droppedItems'] },
     realm: { table: 'realms', list: ['id', 'name', 'min_level', 'master_realm_id'], detail: ['id', 'name', 'min_level', 'master_realm_id', 'shops', 'connections', 'map_objects'], json: ['shops', 'connections', 'map_objects'] },
     master_realm: { table: 'master_realms', list: ['id', 'name'], detail: ['id', 'name', 'min_level', 'imageUrl', 'connected_realms'], json: ['connected_realms'] },
@@ -59,7 +59,7 @@ function cell(col, value, spec) {
  * @param {object} [deps.relay] - catalog/guideRelay.js (CAT-TASK-010): relay presence and tokens
  * @param {object} [deps.seeds] - catalog/seedService.js (CAT-TASK-007)
  */
-export function createCatalogService({ db, store, guideStore, collector = null, operations = readOperations(), now = Date.now, relay = null, seeds = null }) {
+export function createCatalogService({ db, store, guideStore, collector = null, operations = readOperations(), now = Date.now, relay = null, seeds = null, itemDiscovery = null }) {
     const relayLastSeenAt = async () => (relay ? relay.lastSeenAt() : null);
     const entityKey = (kind, row) => row.catalog_key ?? (SERVING[kind].natural ? `${row.realm_id}:${row.name}` : String(row.id));
 
@@ -93,6 +93,29 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
     }
 
     return {
+        /** Reads discovery progress without revealing the webhook URL.
+         * @returns {Promise<object>} Daily frontier and recent finds.
+         */
+        async itemDiscoveryStatus() {
+            if (!itemDiscovery) throw new CatalogError('conflict', 'Item discovery is unavailable.');
+            return { ...await itemDiscovery.status(), recent: await itemDiscovery.recent() };
+        },
+        /** Saves owner discovery controls.
+         * @param {object} patch Enable switch and optional initial frontier.
+         * @returns {Promise<object>} Updated progress.
+         */
+        async configureItemDiscovery(patch) {
+            if (!itemDiscovery) throw new CatalogError('conflict', 'Item discovery is unavailable.');
+            await itemDiscovery.configure(patch);
+            return this.itemDiscoveryStatus();
+        },
+        /** Queues a scan for the next account-safe CatalogSync execution.
+         * @returns {Promise<void>}
+         */
+        async requestItemDiscovery() {
+            if (!itemDiscovery) throw new CatalogError('conflict', 'Item discovery is unavailable.');
+            await itemDiscovery.requestScan();
+        },
         /** Guide-compatible fields for the manual form.
          * @returns {object} Allowed field names per kind.
          */
@@ -160,6 +183,7 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
             const seen = await relayLastSeenAt();
             return {
                 jobs: jobs.slice(0, 20).map(j => ({ ...j, lastResult: results[j.id] ?? null })),
+                ...(itemDiscovery ? { itemDiscovery: await itemDiscovery.status() } : {}),
                 guide: (await guideStore.listStates()).map(s => guideStatus(s, t, seen)),
                 relayLastSeenAt: seen,
                 available: Object.fromEntries(['observe_realm', 'item_frontier', 'guide_discovery'].map(k => [k, unavailableReason(k, operations)])),

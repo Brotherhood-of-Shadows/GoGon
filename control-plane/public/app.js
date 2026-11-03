@@ -546,6 +546,56 @@ async function loadCatalogSummary() {
     renderCatalogState();
 }
 
+let itemDiscoveryLoading = false;
+let itemDiscoveryTotal = null;
+const ITEM_DISCOVERY_ERRORS = {
+    known_item_unavailable: 'The last known valid item is unavailable. Waiting before retrying; no IDs were skipped.',
+    unrecognized_tooltip: 'The item response was not recognized. The cursor has been kept for retry.',
+    challenge: 'The game returned a browser challenge. Waiting before retrying.',
+    storage_error: 'The database checkpoint failed. The item and announcement will be retried together.',
+};
+
+function renderItemDiscoveryState(data) {
+    if (!data) return;
+    document.getElementById('item-discovery-status').textContent = `Status: ${data.status.replaceAll('_', ' ')}.`
+        + (data.lastError ? ` ${ITEM_DISCOVERY_ERRORS[data.lastError] ?? `Last request: ${data.lastError.replaceAll('_', ' ')}.`}` : '');
+    document.getElementById('item-discovery-progress').replaceChildren(...[
+        ['Last valid ID', data.lastValidId ?? 'not started'], ['Last checked ID', data.lastCheckedId ?? '-'],
+        ['Next ID', data.nextItemId ?? '-'], ['Check through', data.lastValidId == null ? '-' : data.lastValidId + data.lookahead],
+        ['New discoveries', data.discoveredTotal], ['Last complete scan', fmtTime(data.lastCompletedAt)], ['Next check', fmtTime(data.nextCheckAt)],
+    ].map(([label, value]) => el('span', { class: 'stat' }, `${label}: ${value}`)));
+    document.getElementById('item-discovery-run').disabled = !data.enabled || !data.webhookConfigured || !data.recommendedStartId;
+    const changed = itemDiscoveryTotal !== null && itemDiscoveryTotal !== data.discoveredTotal;
+    itemDiscoveryTotal = data.discoveredTotal;
+    if (changed && !document.getElementById('catalog-upcoming').hidden) loadItemDiscovery();
+}
+
+async function loadItemDiscovery() {
+    if (itemDiscoveryLoading) return;
+    itemDiscoveryLoading = true;
+    try {
+        const data = await api('GET', '/api/catalog/item-discovery');
+        itemDiscoveryTotal = data.discoveredTotal;
+        renderItemDiscoveryState(data);
+        const form = document.getElementById('item-discovery-form');
+        if (!form.dataset.dirty) {
+            document.getElementById('id-enabled').checked = data.enabled;
+            const input = document.getElementById('id-start');
+            input.value = data.lastValidId ?? data.recommendedStartId ?? '';
+            input.dataset.saved = input.value;
+        }
+        document.getElementById('item-discovery-recent').replaceChildren(...data.recent.map(item => el('tr', {},
+            el('td', {}, item.id), el('td', {}, item.record.name), el('td', {}, fmtTime(item.firstSeenAt)),
+            el('td', {}, el('button', { type: 'button', class: 'ghost', onclick: async () => {
+                catalogView.kind = 'item';
+                [...document.querySelectorAll('#cf-kind option')].find(option => option.value === 'item').selected = true;
+                await openCatalogTab('browse');
+                await showEntity('item', String(item.id));
+            } }, 'View in Catalog')))));
+    } catch (error) { showBanner(fieldMessage(error)); }
+    finally { itemDiscoveryLoading = false; }
+}
+
 /** CAT-TASK-010: stage-only relay tokens. A new token is shown once and never again. */
 function renderRelayTokens(tokens, issued = null) {
     const box = document.getElementById('relay-tokens');
@@ -636,6 +686,7 @@ async function showEntity(kind, key) {
 function renderCatalogState() {
     const c = state?.catalog;
     if (!c) return;
+    renderItemDiscoveryState(c.itemDiscovery);
     document.getElementById('guide-status').replaceChildren(...c.guide.map(g => el('tr', {},
         el('td', {}, g.entityKind),
         el('td', {}, el('span', { class: `pill ${GUIDE_STATUS_CLASS[g.display] ?? ''}` }, g.display.replace(/_/g, ' ')), g.statusReason ? el('span', { class: 'muted' }, ` ${g.statusReason}`) : null,
@@ -768,7 +819,7 @@ async function loadSeeds() {
     }));
 }
 
-const CATALOG_LOADERS = { browse: () => loadEntities(), manual: () => loadManualForm(), sync: () => loadCatalogSummary(), seed: () => loadSeeds(), history: () => loadRuns() };
+const CATALOG_LOADERS = { browse: () => loadEntities(), manual: () => loadManualForm(), upcoming: () => loadItemDiscovery(), sync: () => loadCatalogSummary(), seed: () => loadSeeds(), history: () => loadRuns() };
 
 function openCatalogTab(name) {
     document.querySelectorAll('.subtabs button').forEach(b => b.classList.toggle('active', b.dataset.subtab === name));
@@ -814,6 +865,31 @@ document.querySelectorAll('.tabs button').forEach(button => button.addEventListe
 document.querySelectorAll('.subtabs button').forEach(button => button.addEventListener('click', () => openCatalogTab(button.dataset.subtab)));
 
 const fieldValue = id => document.getElementById(id).value;
+
+document.getElementById('item-discovery-form').addEventListener('input', event => { event.currentTarget.dataset.dirty = '1'; });
+document.getElementById('item-discovery-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const error = form.querySelector('.field-error');
+    error.hidden = true;
+    try {
+        const input = document.getElementById('id-start');
+        const body = { enabled: document.getElementById('id-enabled').checked };
+        if (input.value.trim() && input.value !== input.dataset.saved) body.startAfterId = Number(input.value);
+        await api('POST', '/api/catalog/item-discovery', body);
+        form.dataset.dirty = '';
+        await loadItemDiscovery();
+        showBanner('Item discovery settings saved.', 'ok');
+    } catch (e) { error.textContent = fieldMessage(e); error.hidden = false; }
+});
+document.getElementById('item-discovery-run').addEventListener('click', async () => {
+    try {
+        await api('POST', '/api/catalog/item-discovery/run', {});
+        showBanner('Item discovery queued for the next CatalogSync tick.', 'ok');
+        await loadItemDiscovery();
+    } catch (e) { showBanner(fieldMessage(e)); }
+});
+document.getElementById('item-discovery-refresh').addEventListener('click', () => loadItemDiscovery());
 
 document.getElementById('mf-kind').addEventListener('change', () => { manualEdit = null; renderManualFields(); });
 document.getElementById('manual-entry-cancel').addEventListener('click', () => { manualEdit = null; renderManualFields(); });

@@ -110,8 +110,8 @@ const SCHEMAS = {
     },
     item: {
         table: 'items',
-        columns: { id: field.id, name: field.text(256), rarity: field.text(64), imageUrl: field.text(512), stats: field.json, enhancements: field.json, droppedBy: field.json, setBonuses: field.json, setId: field.idOrNull, setName: field.text(256) },
-        json: ['stats', 'enhancements', 'droppedBy', 'setBonuses'],
+        columns: { id: field.id, name: field.text(256), rarity: field.text(64), imageUrl: field.text(512), stats: field.json, enhancements: field.json, droppedBy: field.json, setBonuses: field.json, setId: field.idOrNull, setName: field.text(256), details: field.json },
+        json: ['stats', 'enhancements', 'droppedBy', 'setBonuses', 'details'],
     },
     relic: { table: 'relics', natural: true, columns: { realm_id: field.id, name: field.name, details: field.json }, json: ['details'] },
     quest: { natural: true, columns: { realm_id: field.id, name: field.name, min_level: field.intOrNull, details: field.json }, json: ['details'] },
@@ -119,7 +119,7 @@ const SCHEMAS = {
 const RELATION_FIELDS = { realm_creature: ['realm_id', 'creature_id'], creature_drop: ['creature_id', 'item_id'] };
 const PROJECTION_ORDER = ['master_realm', 'realm', 'creature', 'item', 'relic', 'quest', 'relation'];
 const EDIT_COLUMNS = {
-    item: { name: 'name', rarity: 'rarity', imageUrl: 'imageUrl', stats: 'stats', enhancements: 'enhancements', droppedBy: 'droppedBy', setBonuses: 'setBonuses', setId: 'setId', setName: 'setName' },
+    item: { name: 'name', rarity: 'rarity', imageUrl: 'imageUrl', stats: 'stats', enhancements: 'enhancements', droppedBy: 'droppedBy', setBonuses: 'setBonuses', setId: 'setId', setName: 'setName', details: 'details' },
     creature: { name: 'name', imageUrl: 'imageUrl', description: 'description', stats: 'stats', enhancements: 'enhancements', droppedItems: 'droppedItems' },
     realm: { name: 'name', minLevel: 'min_level', masterRealmId: 'master_realm_id', shops: 'shops', stairways: 'connections', mapObjects: 'map_objects' },
     master_realm: { name: 'name', minLevel: 'min_level', imageUrl: 'imageUrl', realms: 'connected_realms' },
@@ -380,6 +380,9 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
             // Owner-entered drafts are provisional: a later Guide read can replace their fields.
             const r = source === 'manual_edit' ? 0 : source === 'manual_entry' ? -1 : SOURCE_RANK[source];
             for (const [c, v] of Object.entries(fields)) {
+                // A NULL in a legacy snapshot means unknown. Provisional observations may fill
+                // that slot; replay without them still restores NULL through applyEntity().
+                if ($baseline && v === null) { if (!Object.hasOwn(merged, c)) merged[c] = null; continue; }
                 if (rank[c] !== undefined && r < rank[c]) continue;
                 merged[c] = v;
                 rank[c] = r;
@@ -1093,6 +1096,32 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
     }
 
     return {
+        /** Commits a bounded observation batch with a caller's checkpoint/outbox transaction hook.
+         * @param {{mode: string, source: string, observations: object[], summary?: object}} input Catalog run.
+         * @param {{onRecorded: (tx: object, runId: string) => Promise<void>}} options Durable handoff hook.
+         * @returns {Promise<{runId: string}>} Committed run identity.
+         */
+        async ingestAtomic({ mode, source, observations, summary = {} }, { onRecorded }) {
+            if (!RUN_MODES.includes(mode) || !SOURCES.includes(source) || !Array.isArray(observations) || !observations.length || observations.length > MAX_OBSERVATIONS_PER_RUN) throw invalid('Invalid atomic catalog run.');
+            const normalized = observations.map(observation => normalizeObservation(observation.kind, observation.payload));
+            const runId = uuid();
+            const at = iso();
+            const summaryJson = canonicalJson(summary);
+            if (Buffer.byteLength(summaryJson) > 2048) throw invalid('Run summary is too large.');
+            await db.transaction(async tx => {
+                await lockRevision(tx);
+                await tx.query('INSERT INTO catalog_runs (id, mode, source, status, started_at, summary) VALUES (?, ?, ?, ?, ?, ?)', [runId, mode, source, 'running', at, summaryJson]);
+                for (const observation of normalized) {
+                    const stored = await upsertObservation(tx, source, observation, at);
+                    await linkObservation(tx, runId, stored.id, at);
+                }
+                await onRecorded(tx, runId);
+                await performProjection(tx, runId);
+                await bumpRevision(tx);
+            });
+            invalidateCaches();
+            return { runId };
+        },
         /** Merges protected owner fields into a validated Guide record, field by field.
          * @param {string} kind Guide kind.
          * @param {number} id Guide ID.

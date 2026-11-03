@@ -22,6 +22,8 @@ import { createGuideRelay } from '../catalog/guideRelay.js';
 import { createGuideWorker } from '../catalog/guideWorker.js';
 import { renewGuideClearance } from '../catalog/guideClearance.js';
 import { configureCatalogTask, runCatalogSync } from '../catalog/catalogTask.js';
+import { createItemDiscoveryStore } from '../_gg_data/handler/itemDiscoveryStore.js';
+import { createItemDiscovery } from '../catalog/itemDiscovery.js';
 
 /**
  * CAT-TASK-005: one catalog store and collector shared by the CatalogSync engine task and the
@@ -42,8 +44,10 @@ export async function createCatalog() {
         getUserAgent: () => getSetting('GG_GUIDE_USER_AGENT'),
         renewClearance: renewGuideClearance,
     });
-    configureCatalogTask({ store, collector, guideWorker });
-    const service = createCatalogService({ db, store, guideStore, collector, relay, seeds: createSeedService({ db, store }) });
+    const itemDiscovery = createItemDiscovery({ store: createItemDiscoveryStore(db, store), fetchFn: authedFetch,
+        getWebhook: () => getSetting('GG_UPCOMING_WEBHOOK'), sessionReady: () => !engine.isPaused() });
+    configureCatalogTask({ store, collector, guideWorker, itemDiscovery });
+    const service = createCatalogService({ db, store, guideStore, collector, relay, itemDiscovery, seeds: createSeedService({ db, store }) });
     return { db, store, guideStore, collector, relay, service, runNow: () => runCatalogSync({}) };
 }
 

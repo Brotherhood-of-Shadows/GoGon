@@ -39,6 +39,9 @@ const SUMMARY = {
     policy: { guide: { checkIntervalMs: 86400000, minDelayMs: 3000, maxRequestsPerExecution: 50, dailyRequestCap: 2000 }, ordering: { order: 'newest_first', firstIndex: 0 }, fullSweep: { indexPages: 1279 } },
 };
 const PLAN = { id: '22222222-2222-4222-8222-222222222222', action: 'rollback', targetRunId: '33333333-3333-4333-8333-333333333333', expectedCounts: { entities: 1, remove: 1, rows: { items: -1 } }, confirmation: 'ROLLBACK 33333333 1', expiresAt: '2026-09-28T12:10:00.000Z' };
+const ITEM_DISCOVERY = { enabled: true, webhookConfigured: true, status: 'scheduled', recommendedStartId: 17069, lastValidId: 17069,
+    lastCheckedId: 17079, nextItemId: 17080, lookahead: 10, discoveredTotal: 1, lastCompletedAt: null, nextCheckAt: null,
+    recent: [{ id: 17069, record: { name: HOSTILE }, firstSeenAt: '2026-11-03T12:00:00.000Z' }] };
 
 function respond(url, init) {
     const u = new URL(url, 'http://127.0.0.1');
@@ -46,6 +49,8 @@ function respond(url, init) {
     if (p === '/api/session') return { csrf: 'csrf-token' };
     if (p === '/api/catalog/summary') return SUMMARY;
     if (p === '/api/catalog/guide-scan') return { ok: true };
+    if (p === '/api/catalog/item-discovery') return init.method === 'POST' ? { ok: true } : ITEM_DISCOVERY;
+    if (p === '/api/catalog/item-discovery/run') return { ok: true };
     if (p === '/api/catalog/manual-fields') return { kinds: manualRecordFields() };
     if (p === '/api/catalog/manual-entries') return { ok: true, key: String(JSON.parse(init.body).record.id) };
     if (p === '/api/catalog/entities/creature/7001/edit') {
@@ -92,6 +97,37 @@ before(async () => {
 
 const $ = sel => ui.document.querySelector(sel);
 const click = node => node.dispatchEvent(new ui.Event('click', { bubbles: true }));
+
+test('Item releases shows progress and text-safe discoveries; typed controls save with CSRF without resetting the cursor on toggle', async () => {
+    click($('.tabs button[data-tab="catalog"]'));
+    click($('.subtabs button[data-subtab="upcoming"]'));
+    await flush();
+    assert.equal($('#catalog-upcoming').hidden, false);
+    assert.match($('#item-discovery-progress').textContent, /Last checked ID: 17079/);
+    assert.match($('#item-discovery-recent').textContent, /Golem/);
+    assert.equal($('#item-discovery-recent img'), null);
+    assert.equal($('#id-start').value, '17069');
+    $('#id-enabled').checked = false;
+    $('#item-discovery-form').dispatchEvent(new ui.Event('submit', { cancelable: true }));
+    await flush();
+    let sent = requests.filter(r => r.url === '/api/catalog/item-discovery' && r.method === 'POST').at(-1);
+    assert.deepEqual(JSON.parse(sent.body), { enabled: false });
+    assert.equal(sent.headers['X-CSRF-Token'], 'csrf-token');
+    $('#id-start').value = '17080';
+    $('#id-start').dispatchEvent(new ui.Event('input', { bubbles: true }));
+    click($('#item-discovery-refresh'));
+    await flush();
+    assert.equal($('#id-start').value, '17080', 'refresh preserves an unsaved starting ID');
+    $('#item-discovery-form').dispatchEvent(new ui.Event('submit', { cancelable: true }));
+    await flush();
+    sent = requests.filter(r => r.url === '/api/catalog/item-discovery' && r.method === 'POST').at(-1);
+    assert.equal(JSON.parse(sent.body).startAfterId, 17080);
+    click($('#item-discovery-run'));
+    await flush();
+    sent = requests.filter(r => r.url === '/api/catalog/item-discovery/run').at(-1);
+    assert.deepEqual(JSON.parse(sent.body), {});
+    assert.equal(sent.headers['X-CSRF-Token'], 'csrf-token');
+});
 
 test('manual section switches Guide fields, requires only ID and sends optional typed values with CSRF', async () => {
     click(ui.document.querySelector('.tabs button[data-tab="catalog"]'));

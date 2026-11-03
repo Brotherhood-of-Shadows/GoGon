@@ -68,8 +68,9 @@ export async function runCatalogSync({ signal } = {}) {
             const r = await collector.runJob(job, { signal });
             results.push({ jobId: job.id, kind: job.kind, outcome: r.outcome, reason: r.reason ?? null, requests: r.requests ?? 0 });
         }
+        const items = !signal?.aborted && service.itemDiscovery ? await service.itemDiscovery.run({ signal }) : null;
         const guide = !signal?.aborted && service.guideWorker ? await service.guideWorker.run({ signal }) : null;
-        return { results, guide };
+        return { results, guide, items };
     });
-    return held ? { ran: held.value.results, ...(held.value.guide ? { guide: held.value.guide } : {}) } : { skipped: 'busy' };
+    return held ? { ran: held.value.results, ...(held.value.guide ? { guide: held.value.guide } : {}), ...(held.value.items ? { items: held.value.items } : {}) } : { skipped: 'busy' };
 }

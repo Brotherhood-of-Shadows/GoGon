@@ -4,15 +4,20 @@
 spec:
   id: "catalog-sync-v1"
   status: locked
-  version: "1.8.1"
+  version: "1.9.0"
   created: "2026-09-25"
-  updated: "2026-10-30"
+  updated: "2026-11-03"
 
   version_policy:
     sync_group: "business-domain"
     depends_on: ["data-model", "api-surface", "security"]
 
   changelog:
+    - version: "1.9.0"
+      date: "2026-11-03"
+      changes:
+        - "Owner authorizes daily HTML item discovery from fetchitem.php, with the supplied valid tooltip and exact Invalid Request fixtures. Persist independent last-valid and last-checked IDs, start from catalog max, and extend exploration through last-valid + 10. Next-day scans revisit negative IDs beyond last valid. Add Catalog Item releases controls and secret GG_UPCOMING_WEBHOOK for #upcoming."
+        - "Migration 021 retains tooltip metadata, durable discovery state and an announcement ledger. Discovery imports are provisional manualEntry observations, default Incomplete and pending Guide verification, preserving owner field locks. An atomic catalog projection/checkpoint/outbox transaction and global announcement scope survive restarts and account switches. Known-item probes bracket each scan; failures preserve progress with backoff. Existing three-second spacing, 50-request batches, session cancellation and catalog lock apply. Legacy unverified JSON frontier remains separate."
     - version: "1.8.1"
       date: "2026-10-30"
       changes:
@@ -814,10 +819,12 @@ constraints:
   - "Catalog creation and editing use typed controls, numeric stat/range fields, and add/remove rows for collections; no field requires users to enter raw JSON. Every catalog kind has a prefilled Edit entry flow. IDs are stable; natural identity changes are tracked by catalog_entity_aliases. Patches preserve omitted data, use an optimistic conflict token, commit provenance/relationships atomically, and retain entered values on validation or conflict errors."
   - "Guide update labels are per field, including individual stats and range endpoints: Do not check preserves the owner value and exempts that field from missing-data requirements; Incomplete accepts a later validated Guide value and keeps discovery pending while the Guide lacks that field; Complete marks the field fulfilled and preserves it. Parent policies apply to descendants unless a more specific policy overrides them. Changing a parent policy replaces inherited descendant policies unless explicitly specified. New manual fields default Incomplete. An Incomplete field becomes Complete only after a valid Guide value is projected. Labels, values, relationships, and their rollback are transactional; a locked creature location list cannot be expanded by a Guide realm page."
   - "Owner edit runs replay at baseline precedence; catalog_field_states supplies the current per-field values above source precedence, rather than globally pinning a whole edited record. A protected field cannot be overwritten by unrelated projections. Guide field updates are staged with their run and applied in its projection transaction; a failed projection cannot mark fields complete. Complete or Do not check edits do not requeue an already verified entity unless another field remains Incomplete."
+  - "Daily Item releases uses only the owner-attested GET https://www.fallensword.com/fetchitem.php?item_id=N&inv_id=-1&t=0&extra=0 and numeric-ID CDN images. Only exact Invalid Request on HTTP 2xx advances a missing ID. Known last-valid probes must succeed before exploration and before completion. Start after catalog maximum or an explicit owner baseline; scan through dynamically extended last-valid + 10 inclusive. Recheck the negative tail every 24 hours after completion; partial batches resume their stored next ID. Never use last-checked + 1 as the next daily baseline."
+  - "Item release data follows provisional manual entry precedence and stays Incomplete until validated Guide information completes it. Preserve extra tooltip metadata without claiming missing drop/set relationships. Catalog observations, projection, Guide pending registration, announcement ledger, outbox insert and checkpoint commit atomically for each positive item. Announcements dedupe by item ID independently of outbox retention and account profile; global announcement rows can be dispatched through any active authenticated account while private rows retain account isolation. A historical baseline or rewind never republishes known releases."
   - "Existing Discord lookup tables remain available throughout rollout. Catalog refreshes use incremental transactionally consistent projection; scripts/populate_db.mjs is manual-only until explicitly retired or redesigned, and refuses to run while catalog projections exist unless given --discard-catalog-projections (DEC-CAT-009)."
   - "The first time a projection touches an existing serving row with no catalog provenance, that row is stored as a guide_baseline observation in a baseline_snapshot run, so rollback restores it (DEC-CAT-008)."
   - "Serving relations are normalized with foreign keys (DEC-CAT-010): quests (realm_id, name unique), realm_creatures, creature_drops, realms.master_realm_id (SET NULL), relics.realm_id (CASCADE). Serving writers upsert with INSERT ... ON DUPLICATE KEY UPDATE and never REPLACE INTO, which would cascade deletions. A relic's identity is (realm_id, name). realms.creatures remains the JSON view Discord reads and is kept in step with realm_creatures."
-  - "Provenance (run, observations, links) commits in one transaction and projection in a second; a failed projection leaves the run failed with only a redacted error code (DEC-CAT-011)."
+  - "Ordinary provenance (run, observations, links) commits in one transaction and projection in a second; a failed projection leaves the run failed with only a redacted error code (DEC-CAT-011). Item releases use an atomic transaction boundary so a failed catalog/outbox/checkpoint write leaves none of those changes committed and retries the same ID."
   - "The dashboard does not support raw SQL, raw database table browsing, arbitrary outbound fetches, or arbitrary file imports."
   - "Seed promotion, rollback, and deletion use a server-generated, one-use plan valid for no more than 10 minutes; only server-calculated affected counts may be confirmed."
   - "All timestamps are UTC ISO-8601 strings. Catalog errors, run summaries, and audit records must be credential-free and URL-redacted."
