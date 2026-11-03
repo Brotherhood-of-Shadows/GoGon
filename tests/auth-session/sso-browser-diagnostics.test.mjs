@@ -6,7 +6,8 @@ test('Python helper keeps stage/page diagnostics out of cookie stdout and preser
   // Browser dependencies are doubles: this exercises the helper itself without launching Chromium,
   // interacting with verification, submitting credentials or making any network request.
   const script = `
-import asyncio, importlib.util, json, os, sys, types
+import asyncio, importlib.util, json, os, sys, tempfile, types
+from pathlib import Path
 sys.dont_write_bytecode = True
 sys.path.insert(0, 'scripts/control-plane')
 os.environ['GG_GUIDE_CHROMIUM_PATH'] = '/fixture/chromium'
@@ -32,6 +33,8 @@ async def start(**kwargs):
     return Browser()
 async def verification(tab, profile, *, report):
     await helper.account_is_loaded(tab, report)
+    (profile / 'challenge.png').write_bytes(b'\\x89PNG\\r\\n\\x1a\\nfixture image')
+    (profile / 'cookies.json').write_text('private-cookie-fixture')
     raise TimeoutError('fixture verification timeout')
 sys.modules['nodriver'] = types.SimpleNamespace(start=start)
 sys.modules['challenge_browser'] = types.SimpleNamespace(click_verification=verification)
@@ -62,7 +65,21 @@ async def run():
     else:
         raise AssertionError('verification timeout was swallowed')
     assert stopped == ['success', 'navigation', 'verification'], stopped
-asyncio.run(run())
+with tempfile.TemporaryDirectory() as directory:
+    helper.FAILURE_IMAGE_DIRECTORY = Path(directory) / 'snapshots'
+    asyncio.run(run())
+    saved = helper.FAILURE_IMAGE_DIRECTORY / 'last-failure.png'
+    assert saved.read_bytes() == b'\\x89PNG\\r\\n\\x1a\\nfixture image'
+    assert saved.stat().st_mode & 0o777 == 0o600
+    assert [path.name for path in helper.FAILURE_IMAGE_DIRECTORY.iterdir()] == ['last-failure.png']
+    # A missing/unwritable output directory must never replace the actual browser failure.
+    source = Path(directory) / 'source'
+    source.mkdir()
+    (source / 'challenge.png').write_bytes(saved.read_bytes())
+    helper.FAILURE_IMAGE_DIRECTORY = saved
+    events = []
+    helper.preserve_failure_image(source, lambda operation, event: events.append((operation, event)))
+    assert events == [('failure_image_unavailable', 'observed')], events
 `;
   const actual = spawnSync('python3', ['-c', script], { encoding: 'utf8', timeout: 10_000 });
   assert.equal(actual.status, 0, actual.stderr || actual.error?.message);
@@ -76,6 +93,7 @@ asyncio.run(run())
   const verification = actual.stderr.split('CASE:verification')[1];
   assert.match(verification, /SSO_STAGE:verification/);
   assert.match(verification, /SSO_PAGE:challenge/);
+  assert.match(verification, /SSO_DEBUG:failure_image_saved:observed:/);
 });
 
 test('shared browser operations identify interruption and abort a lookup that ignores its own timeout', () => {

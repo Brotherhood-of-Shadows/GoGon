@@ -24,6 +24,36 @@ ACCOUNT_PAGE = re.compile(r'<form\b[^>]*id=["\']m-login-form["\']', re.I)
 COOKIE_NAMES = {"cf_clearance", "hcs_session_key"}
 COOKIE_DOMAINS = {"huntedcow.com", ".huntedcow.com", "account.huntedcow.com"}
 CHALLENGE_PAGE = re.compile(r"/cdn-cgi/challenge-platform/|cf[_-]chl[_-]|<title>\s*Just a moment", re.I)
+FAILURE_IMAGE_DIRECTORY = Path('/var/lib/gogon-sso-debug')
+
+
+def preserve_failure_image(profile_directory: Path, report: Reporter) -> None:
+    """Retain only the existing pre-interaction PNG; diagnostic I/O must not replace a login error."""
+    temporary_path = None
+    try:
+        source = profile_directory / 'challenge.png'
+        if not source.is_file() or not 8 <= source.stat().st_size <= 5 * 1024 * 1024:
+            report('failure_image_unavailable', 'observed')
+            return
+        data = source.read_bytes()
+        if not data.startswith(b'\x89PNG\r\n\x1a\n'):
+            report('failure_image_unavailable', 'observed')
+            return
+        FAILURE_IMAGE_DIRECTORY.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=FAILURE_IMAGE_DIRECTORY, prefix='.failure-', delete=False) as target:
+            temporary_path = Path(target.name)
+            target.write(data)
+        temporary_path.replace(FAILURE_IMAGE_DIRECTORY / 'last-failure.png')
+        temporary_path = None
+        report('failure_image_saved', 'observed')
+    except OSError:
+        report('failure_image_unavailable', 'observed')
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def report_stage(stage: Literal["browser_start", "navigation", "account_wait", "verification",
@@ -81,6 +111,7 @@ async def renew(entry_url: str) -> None:
     profile_directory = Path(tempfile.mkdtemp(prefix="gogon-sso-clearance-"))
     prepare_browser_environment(profile_directory)
     browser = None
+    completed = False
     try:
         report_stage("browser_start")
         with debug_step("browser_start", report):
@@ -123,7 +154,10 @@ async def renew(entry_url: str) -> None:
                 or any(ord(character) < 32 or ord(character) == 127 for character in user_agent):
             raise ValueError("HuntedCow browser produced an invalid user agent")
         print(json.dumps({"cookies": selected, "userAgent": user_agent}), flush=True)
+        completed = True
     finally:
+        if not completed:
+            preserve_failure_image(profile_directory, report)
         if browser is not None:
             with debug_step("browser_stop", report):
                 browser.stop()

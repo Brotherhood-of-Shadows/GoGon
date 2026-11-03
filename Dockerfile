@@ -32,6 +32,11 @@ RUN python3 -m venv /opt/gogon-guide-python \
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# The browser profile stays in /tmp. Only its latest pre-interaction failure PNG is retained.
+RUN mkdir -p /var/lib/gogon-sso-debug \
+ && chown node:node /var/lib/gogon-sso-debug \
+ && chmod 0700 /var/lib/gogon-sso-debug
+
 USER node
 EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \

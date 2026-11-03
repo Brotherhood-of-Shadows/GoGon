@@ -58,6 +58,20 @@ outer deadline bounds these calls to the configured lookup duration plus two sec
 for English, 5 for Portuguese), then aborts the attempt and cleans up the temporary browser. This
 prevents an unresponsive browser command from spending the full 90-second helper budget; it does
 not establish that verification will succeed on the next attempt.
+On a failed SSO attempt, the existing screenshot taken before the lookup is retained as
+`/var/lib/gogon-sso-debug/last-failure.png`. Compose mounts a private named volume at this path so
+the latest PNG survives container restarts; browser profiles and cookies remain temporary. The
+image is from before the interaction, not the page at timeout. Only the latest bounded PNG is kept,
+with owner-only file permissions; failures to save it never replace the original login error.
+After the log says `failure screenshot saved`, copy it from the VPS project directory:
+
+```sh
+docker compose cp gogon:/var/lib/gogon-sso-debug/last-failure.png ./sso-last-failure.png
+```
+
+Inspect that image to see what the browser displayed at the start of the lookup. A successfully
+completed screenshot or image-match operation does not establish that a verification control was
+found or that the browser completed verification.
 
 ## 2. Build and start
 
