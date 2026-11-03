@@ -44,6 +44,11 @@ function respond(url, init) {
     if (p === '/api/session') return { csrf: 'csrf-token' };
     if (p === '/api/catalog/summary') return SUMMARY;
     if (p === '/api/catalog/guide-scan') return { ok: true };
+    if (p === '/api/catalog/manual-fields') return { kinds: {
+        item: ['id', 'name', 'stats'], creature: ['id', 'name', 'description', 'stats'], realm: ['id', 'name', 'minLevel'],
+        master_realm: ['id', 'name', 'realms'], relic: ['id', 'name', 'realmId', 'sections'], quest: ['id', 'name', 'realmId', 'minLevel', 'sections'],
+    } };
+    if (p === '/api/catalog/manual-entries') return { ok: true, key: String(JSON.parse(init.body).record.id) };
     if (p === '/api/catalog/entities') return { kind: u.searchParams.get('kind'), page: 1, pageSize: 25, total: 1, items: [{ key: '7001', id: 7001, name: HOSTILE, catalog: { completeness: 'incomplete', incompleteReasons: ['known_drop_unresolved'], lastSeenAt: '2026-09-28T11:00:00.000Z' } }] };
     if (p === '/api/catalog/entities/creature/7001') {
         return { kind: 'creature', key: '7001', fields: { id: 7001, name: HOSTILE, description: '<script>steal()</script>', stats: { level: 5 } }, relations: { realms: [{ id: 1200, name: '<b>Path</b>' }], drops: [] },
@@ -80,6 +85,38 @@ before(async () => {
 
 const $ = sel => ui.document.querySelector(sel);
 const click = node => node.dispatchEvent(new ui.Event('click', { bubbles: true }));
+
+test('manual section switches Guide fields, requires only ID and sends optional typed values with CSRF', async () => {
+    click(ui.document.querySelector('.tabs button[data-tab="catalog"]'));
+    click(ui.document.querySelector('.subtabs button[data-subtab="manual"]'));
+    await flush();
+    assert.equal($('#catalog-manual').hidden, false);
+    assert.equal($('#mf-id').required, true);
+    assert.equal($('#mf-name').required, false);
+    $('#mf-id').value = '456';
+    $('#manual-entry-form').dispatchEvent(new ui.Event('submit', { cancelable: true }));
+    await flush();
+    let sent = requests.filter(r => r.url === '/api/catalog/manual-entries').at(-1);
+    assert.deepEqual(JSON.parse(sent.body), { kind: 'item', record: { id: 456 } });
+    assert.equal(sent.headers['X-CSRF-Token'], 'csrf-token');
+    [...ui.document.querySelectorAll('#mf-kind option')].find(o => o.value === 'creature').selected = true;
+    $('#mf-kind').dispatchEvent(new ui.Event('change'));
+    assert.ok($('#mf-description'));
+    $('#mf-id').value = '457';
+    $('#mf-name').value = HOSTILE;
+    $('#mf-stats').value = '{broken';
+    const count = requests.filter(r => r.url === '/api/catalog/manual-entries').length;
+    $('#manual-entry-form').dispatchEvent(new ui.Event('submit', { cancelable: true }));
+    await flush();
+    assert.equal(requests.filter(r => r.url === '/api/catalog/manual-entries').length, count);
+    assert.match($('#manual-entry-form .field-error').textContent, /stats must be valid JSON/);
+    $('#mf-stats').value = '{"level":10}';
+    $('#manual-entry-form').dispatchEvent(new ui.Event('submit', { cancelable: true }));
+    await flush();
+    sent = requests.filter(r => r.url === '/api/catalog/manual-entries').at(-1);
+    assert.deepEqual(JSON.parse(sent.body), { kind: 'creature', record: { id: 457, name: HOSTILE, stats: { level: 10 } } });
+    assert.equal($('#manual-entry-save').disabled, false);
+});
 
 test('CAT-TASK-006: the dashboard script never parses markup', () => {
     for (const sink of [/\.innerHTML\b/, /\.outerHTML\b/, /insertAdjacentHTML/, /document\.write/, /\beval\(/, /new Function\(/]) assert.doesNotMatch(APP, sink);

@@ -364,7 +364,8 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
         const raw = new Set();
         for (const { payload, source } of entries) {
             const { $baseline, ...fields } = payload;
-            const r = SOURCE_RANK[source];
+            // Owner-entered drafts are provisional: a later Guide read can replace their fields.
+            const r = source === 'manual_entry' ? -1 : SOURCE_RANK[source];
             for (const [c, v] of Object.entries(fields)) {
                 if (rank[c] !== undefined && r < rank[c]) continue;
                 merged[c] = v;
@@ -384,12 +385,13 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
      * Order: baseline snapshots first, then observation order.
      */
     const provenanceOf = (q, kind, key, { includeRun = '', excludeRun = '' }) => q.query(
-        `SELECT o.id, o.payload, o.source, ro.run_id, ro.observed_at FROM catalog_run_observations ro
+        `SELECT o.id, o.payload, o.source, ro.run_id, ro.observed_at, r.summary AS run_summary FROM catalog_run_observations ro
          JOIN catalog_observations o ON o.id = ro.observation_id
          JOIN catalog_runs r ON r.id = ro.run_id
          WHERE o.entity_kind = ? AND o.entity_key = ? AND (r.status = 'succeeded' OR r.id = ?) AND ro.run_id <> ?
          ORDER BY CASE WHEN r.mode = '${BASELINE_MODE}' THEN 0 ELSE 1 END, ro.seq`, [kind, key, includeRun, excludeRun]);
-    const replayRows = (kind, rows) => replay(kind, rows.map(r => ({ payload: parse(r.payload), source: r.source })));
+    const replayRows = (kind, rows) => replay(kind, rows.map(r => ({ payload: parse(r.payload),
+        source: r.source === 'manual_import' && r.run_summary && parse(r.run_summary).manualEntry === true ? 'manual_entry' : r.source })));
 
     /**
      * Checks a state against the parents that exist now. An unknown master realm becomes NULL (as in
@@ -449,14 +451,15 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
             for (const [k, key] of stateKeys) if (!removing.has(`${k}|${key}`)) cascadeKeys.add(`${k}|${key}`);
         }
         const restoreKept = restore.filter(r => !cascadeKeys.has(`${r.kind}|${r.key}`));
+        const [{ n: manualPending }] = await q.query('SELECT COUNT(*) AS n FROM catalog_manual_entries WHERE run_id = ?', [runId]);
         return {
             restore: restoreKept,
             remove,
             counts: {
                 observations: Number(observations),
-                entities: touched.length,
+                entities: touched.length + Number(manualPending),
                 restore: restoreKept.length,
-                remove: remove.length,
+                remove: remove.length + Number(manualPending),
                 relations: touched.filter(t => t.entity_kind === 'relation').length,
                 cascade: cascadeKeys.size,
             },
@@ -490,6 +493,7 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
     async function performRollback(tx, runId, planId) {
         const computed = await computeRollback(tx, runId);
         const before = await servingCounts(tx);
+        await tx.query('DELETE FROM catalog_manual_entries WHERE run_id = ?', [runId]);
         for (const r of computed.remove) {
             await removeEntity(tx, r.kind, r.payload, { dryRun: false });
             await tx.query('DELETE FROM catalog_entities WHERE entity_kind = ? AND entity_key = ?', [r.kind, r.key]);
@@ -523,7 +527,7 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
 
     async function servingCounts(q) {
         const out = {};
-        for (const table of ['master_realms', 'realms', 'creatures', 'items', 'relics', 'quests', 'realm_creatures', 'creature_drops']) {
+        for (const table of ['master_realms', 'realms', 'creatures', 'items', 'relics', 'quests', 'realm_creatures', 'creature_drops', 'catalog_manual_entries']) {
             out[table] = Number((await q.query(`SELECT COUNT(*) AS n FROM ${table}`))[0].n);
         }
         return out;
@@ -724,6 +728,46 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
     };
 
     return {
+        /** Creates a provisional record and registers its Guide ID in one transaction.
+         * @param {object} input Validated kind, Guide record and serving observations.
+         * @returns {Promise<{runId: string, key: string}>} Created catalog identity.
+         */
+        async createManualEntry({ kind, record, observations, references = [] }) {
+            const normalized = observations.map(o => normalizeObservation(o.kind, o.payload));
+            const payload = canonicalJson(record);
+            if (Buffer.byteLength(payload) > MAX_PAYLOAD_BYTES) throw invalid('Manual entry is too large.', 'record');
+            const natural = kind === 'relic' || kind === 'quest';
+            const runId = uuid();
+            const at = iso();
+            const key = natural ? `manual:${record.id}` : String(record.id);
+            await db.transaction(async tx => {
+                await lockRevision(tx);
+                const table = kind === 'quest' ? 'quests' : SCHEMAS[kind].table;
+                const existing = natural
+                    ? [...await tx.query('SELECT entity_id FROM catalog_manual_entries WHERE entity_kind = ? AND entity_id = ?', [kind, record.id]),
+                        ...await tx.query(`SELECT s.id FROM ${table} s JOIN catalog_guide_ids g ON g.entity_key = CONCAT(s.realm_id, ':', s.name) WHERE g.entity_kind = ? AND g.entity_id = ?`, [kind, record.id])]
+                    : await tx.query(`SELECT id FROM ${table} WHERE id = ?`, [record.id]);
+                if (existing.length) throw new CatalogError('conflict', 'This ID already exists in the catalog.');
+                await tx.query('INSERT INTO catalog_runs (id, mode, source, status, started_at, summary) VALUES (?, ?, ?, ?, ?, ?)',
+                    [runId, 'seed', 'manual_import', 'running', at, canonicalJson({ manualEntry: true, kind, guideId: record.id, manualRecord: record })]);
+                for (const o of normalized) {
+                    const obs = await upsertObservation(tx, 'manual_import', o, at);
+                    await linkObservation(tx, runId, obs.id, at);
+                }
+                if (natural) await tx.query('INSERT INTO catalog_manual_entries (entity_kind, entity_id, payload, name, realm_id, min_level, run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                    [kind, record.id, payload, record.name ?? null, record.realmId ?? null, record.minLevel ?? null, runId, at]);
+                await tx.query('INSERT INTO catalog_guide_ids (entity_kind, entity_id, first_seen_at, next_detail_at) VALUES (?, ?, ?, ?) AS new ON DUPLICATE KEY UPDATE detail_status = \'pending\', detail_hash = NULL, detail_checked_at = NULL, detail_attempts = 0, next_detail_at = new.next_detail_at',
+                    [kind, record.id, at, at]);
+                for (const ref of references) {
+                    await tx.query('INSERT IGNORE INTO catalog_guide_ids (entity_kind, entity_id, first_seen_at, next_detail_at, entity_key) VALUES (?, ?, ?, ?, ?)',
+                        [ref.kind, ref.id, at, at, ref.entityKey ?? null]);
+                }
+                await performProjection(tx, runId);
+                await bumpRevision(tx);
+            });
+            invalidateCaches();
+            return { runId, key };
+        },
         /**
          * Transaction 1 (AC-CAT-005, AC-CAT-006): validates everything first, so an invalid batch
          * writes nothing; then stores the run and its provenance with status 'running'.
@@ -958,6 +1002,7 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
          */
         async hasDiscardableWork(q = db) {
             if ((await q.query('SELECT 1 AS present FROM catalog_entities LIMIT 1')).length) return true;
+            if ((await q.query('SELECT 1 AS present FROM catalog_manual_entries LIMIT 1')).length) return true;
             return (await q.query("SELECT 1 AS present FROM catalog_runs WHERE status = 'running' LIMIT 1")).length > 0;
         },
 
@@ -976,6 +1021,7 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
                 throw new CatalogError('conflict', 'The catalog has projected data or a recorded run waiting to project. Re-run with --discard-catalog-projections to replace it (those runs become discarded and cannot be projected or rolled back).');
             }
             await tx.query('DELETE FROM catalog_entities');
+            await tx.query('DELETE FROM catalog_manual_entries');
             // Baseline snapshots describe the rows being replaced, and a recorded but unprojected run
             // would repopulate them, so both are retired too. Only runs recorded later can project.
             const { affectedRows } = await tx.query("UPDATE catalog_runs SET status = 'discarded' WHERE status IN ('succeeded', 'running')");

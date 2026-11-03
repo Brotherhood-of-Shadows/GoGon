@@ -114,6 +114,33 @@ const state = async (g, kind) => g.getState(kind);
 const count = async (db, table) => Number((await db.query(`SELECT COUNT(*) AS n FROM ${table}`))[0].n);
 const enableJob = store => store.createJob({ kind: 'guide_discovery', cursor: {}, requestBudget: 50 });
 
+test('manual records stay incomplete through missing pages and become fulfilled after Guide details arrive', async () => {
+    const ctx = await setup();
+    const { db, store, guideStore, site, clock } = ctx;
+    const service = createCatalogService({ db, store, guideStore });
+    await enableJob(store);
+    for (const [kind, id] of [['creature', 7001], ['item', 17048], ['realm', 1200], ['master_realm', 5], ['relic', 8], ['quest', 501]]) {
+        await service.addManualEntry({ kind, record: { id, name: `Temporary ${kind}` } });
+        assert.ok((await guideStore.dueDetails(kind, 50)).includes(id));
+    }
+    site.ids.relic = [];
+    await ctx.drain();
+    assert.equal((await guideStore.getIdState('relic', 8)).status, 'missing');
+    assert.equal((await service.getEntity('relic', 'manual:8')).catalog.completeness, 'incomplete');
+    site.ids.relic = [8];
+    clock.t += GUIDE_POLICY.detailRefreshAfterMs + 1;
+    await ctx.drain();
+    for (const [kind, id] of [['creature', 7001], ['item', 17048], ['realm', 1200], ['master_realm', 5], ['relic', 8], ['quest', 501]]) {
+        const tracked = await guideStore.getIdState(kind, id);
+        assert.equal(tracked.status, 'ok', kind);
+        const detail = await service.getEntity(kind, tracked.entityKey ?? String(id));
+        assert.equal(detail.catalog.completeness, 'complete', `${kind}: ${JSON.stringify(detail.catalog)}`);
+        assert.doesNotMatch(detail.fields.name, /^Temporary/, 'Guide replaces provisional manual values');
+        assert.ok(!(await guideStore.dueDetails(kind, 50)).includes(id), 'fulfilled manual records stop being fetched');
+    }
+    assert.deepEqual(await db.query('SELECT * FROM catalog_manual_entries'), []);
+});
+
 test('CAT-TASK-014: existing snapshot items and creatures enter guide coverage due at once', async () => {
     const { db, relay, guideStore, clock } = await setup();
     await db.query('INSERT INTO items (id, name) VALUES (?, ?)', [17049, 'Snapshot item']);

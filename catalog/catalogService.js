@@ -9,6 +9,7 @@ import { getGuidePolicy } from './guidePolicy.js';
 import { GUIDE_ORDERING } from './contracts/guide.js';
 import { readOperations, unavailableReason } from './requestPolicy.js';
 import { describeSeedSources } from './sourceRegistry.js';
+import { manualRecordFields, validManualRecord, mapGuideRecord } from './guideNormalizers.js';
 
 export const BROWSE_KINDS = Object.freeze(['item', 'creature', 'realm', 'master_realm', 'relic', 'quest']);
 export const JOB_ACTIONS = Object.freeze({ pause: 'paused', resume: 'queued', cancel: 'cancelled' });
@@ -54,7 +55,7 @@ function cell(col, value, spec) {
  */
 export function createCatalogService({ db, store, guideStore, collector = null, operations = readOperations(), now = Date.now, relay = null, seeds = null }) {
     const relayLastSeenAt = async () => (relay ? relay.lastSeenAt() : null);
-    const entityKey = (kind, row) => (SERVING[kind].natural ? `${row.realm_id}:${row.name}` : String(row.id));
+    const entityKey = (kind, row) => row.catalog_key ?? (SERVING[kind].natural ? `${row.realm_id}:${row.name}` : String(row.id));
 
     async function statesFor(kind, keys) {
         if (!keys.length) return new Map();
@@ -78,6 +79,30 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
     }
 
     return {
+        /** Guide-compatible fields for the manual form.
+         * @returns {object} Allowed field names per kind.
+         */
+        manualFields: manualRecordFields,
+
+        /** Adds an ID-only or partial record, provisionally, for future Guide completion.
+         * @param {{kind: string, record: object}} input Manual form data.
+         * @returns {Promise<object>} Created run and entity key.
+         */
+        async addManualEntry({ kind, record }) {
+            if (!BROWSE_KINDS.includes(kind)) throw invalid('Unknown kind.', 'kind');
+            if (!validManualRecord(kind, record)) throw invalid('Use a valid Guide ID and valid optional Guide fields.', 'record');
+            // Natural identities remain in the manual queue until a validated Guide detail supplies
+            // the authoritative realm/name key. All submitted fields are kept in that queue.
+            const mapped = SERVING[kind].natural ? { observations: [], references: [], relations: [] } : mapGuideRecord(kind, record);
+            const observations = [...mapped.observations];
+            for (const ref of mapped.references) {
+                if (SERVING[ref.kind].natural || observations.some(o => o.kind === ref.kind && o.payload.id === ref.id)) continue;
+                const existing = await db.query(`SELECT id FROM ${SERVING[ref.kind].table} WHERE id = ?`, [ref.id]);
+                if (!existing.length) observations.push({ kind: ref.kind, payload: { id: ref.id, ...(ref.name ? { name: ref.name } : {}) } });
+            }
+            observations.push(...mapped.relations.map(payload => ({ kind: 'relation', payload })));
+            return store.createManualEntry({ kind, record, observations, references: mapped.references });
+        },
         /** Schedules index discovery through the existing Guide worker; completed details stay fulfilled.
          * @returns {Promise<void>} Rejects when Guide discovery is unavailable or paused.
          */
@@ -108,6 +133,12 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
                 const byCompleteness = {};
                 for (const r of await db.query('SELECT completeness, COUNT(*) AS n FROM catalog_entities WHERE entity_kind = ? AND completeness IS NOT NULL GROUP BY completeness', [kind])) byCompleteness[r.completeness] = Number(r.n);
                 kinds[kind] = { rows: Number(n), tracked: Number(e.tracked), lastSeenAt: e.lastSeenAt ?? null, complete: byCompleteness.complete ?? 0, incomplete: byCompleteness.incomplete ?? 0 };
+                if (SERVING[kind].natural) {
+                    const [{ n: pending }] = await db.query('SELECT COUNT(*) AS n FROM catalog_manual_entries WHERE entity_kind = ?', [kind]);
+                    kinds[kind].rows += Number(pending);
+                    kinds[kind].tracked += Number(pending);
+                    kinds[kind].incomplete += Number(pending);
+                }
             }
             return {
                 ...(await this.stateSummary()),
@@ -130,14 +161,20 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
             if (q !== null && (typeof q !== 'string' || q.length < 1 || q.length > 64)) throw invalid('q must be 1-64 characters.', 'q');
             if (completeness !== null && !COMPLETENESS.includes(completeness)) throw invalid('completeness is complete or incomplete.', 'completeness');
             const spec = SERVING[kind];
-            const cols = spec.list.map(c => `s.\`${c}\``).join(', ');
+            const cols = spec.list.map(c => `s.\`${c}\``).join(', ') + (spec.natural ? ', s.catalog_key, s.manual_created_at' : '');
             const where = [];
             const params = [];
             let from = `${spec.table} s`;
+            if (spec.natural) {
+                const servingCols = spec.list.map(c => `\`${c}\``).join(', ');
+                const pendingCols = spec.list.map(c => c === 'id' ? 'entity_id AS id' : `\`${c}\``).join(', ');
+                from = `(SELECT ${servingCols}, CONCAT(realm_id, ':', name) AS catalog_key, NULL AS manual_created_at FROM ${spec.table}
+                    UNION ALL SELECT ${pendingCols}, CONCAT('manual:', entity_id) AS catalog_key, created_at AS manual_created_at FROM catalog_manual_entries WHERE entity_kind = '${kind}') s`;
+            }
             if (completeness) {
-                from += ` JOIN catalog_entities e ON e.entity_kind = ? AND e.entity_key = ${spec.natural ? "CONCAT(s.realm_id, ':', s.name)" : 's.id'}`;
+                from += ` LEFT JOIN catalog_entities e ON e.entity_kind = ? AND e.entity_key = ${spec.natural ? 's.catalog_key' : 's.id'}`;
                 params.push(kind);
-                where.push('e.completeness = ?');
+                where.push(spec.natural ? "COALESCE(e.completeness, CASE WHEN s.manual_created_at IS NOT NULL THEN 'incomplete' ELSE NULL END) = ?" : 'e.completeness = ?');
                 params.push(completeness);
             }
             // Case-insensitive on both MySQL (utf8mb4_bin compares exactly) and SQLite.
@@ -151,7 +188,8 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
                 kind, page, pageSize, total: Number(n),
                 items: rows.map(r => {
                     const key = entityKey(kind, r);
-                    const s = states.get(key);
+                    const s = states.get(key) ?? (r.manual_created_at ? { first_seen_at: r.manual_created_at, last_seen_at: r.manual_created_at,
+                        completeness: 'incomplete', incomplete_reason: 'guide_detail_missing' } : null);
                     const out = { key };
                     for (const c of spec.list) out[c] = cell(c, r[c], spec);
                     out.catalog = s ? {
@@ -167,6 +205,16 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
         async getEntity(kind, key) {
             if (!BROWSE_KINDS.includes(kind)) throw invalid('Unknown kind.', 'kind');
             const spec = SERVING[kind];
+            if (spec.natural && /^manual:[1-9]\d{0,7}$/.test(key)) {
+                const id = Number(key.slice(7));
+                const [entry] = await db.query('SELECT * FROM catalog_manual_entries WHERE entity_kind = ? AND entity_id = ?', [kind, id]);
+                if (!entry) throw new CatalogError('not_found', 'Unknown manual entry.');
+                const guide = await guideStore.getIdState(kind, id);
+                return { kind, key, fields: JSON.parse(entry.payload), relations: {},
+                    provenance: [{ source: 'manual_import', hash: '', runId: entry.run_id, observedAt: entry.created_at, mode: 'seed', runStatus: 'succeeded' }],
+                    catalog: { completeness: 'incomplete', incompleteReasons: ['guide_detail_missing'], firstSeenAt: entry.created_at, lastSeenAt: entry.created_at, verifiedAt: null },
+                    guide: guide ? { status: guide.status, checkedAt: guide.checkedAt, nextCheckAt: guide.nextDetailAt, attempts: guide.attempts } : null };
+            }
             let row;
             if (spec.natural) {
                 const m = typeof key === 'string' ? key.match(/^(\d{1,18}):(.{1,191})$/s) : null;

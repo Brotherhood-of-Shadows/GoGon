@@ -40,6 +40,16 @@ async function setup() {
     return { db, store, clock, invalidations };
 }
 
+test('pending ID-only manual entries require explicit legacy discard and are removed by that discard', async () => {
+    const { db, store } = await setup();
+    await store.createManualEntry({ kind: 'relic', record: { id: 123 }, observations: [] });
+    assert.equal(await store.hasDiscardableWork(), true);
+    await assert.rejects(db.transaction(tx => store.discardProjections(tx, { allowDiscard: false })), { code: 'conflict' });
+    assert.equal((await db.query('SELECT COUNT(*) AS n FROM catalog_manual_entries'))[0].n, 1);
+    await db.transaction(tx => store.discardProjections(tx, { allowDiscard: true }));
+    assert.equal(await store.hasDiscardableWork(), false);
+});
+
 const count = async (db, from, params = []) => Number((await db.query(`SELECT COUNT(*) AS n FROM ${from}`, params))[0].n);
 const revision = async db => Number((await db.query('SELECT revision FROM catalog_state WHERE id = 1'))[0].revision);
 const obs = (kind, payload) => ({ kind, payload });
@@ -579,7 +589,7 @@ test('CAT-TASK-002: a database that applied the narrow 003 gets 255-character en
     const db = await quietly(() => freshClient({ migrate: false }));
     await quietly(() => runMigrations(db, dir));
     const applied = await quietly(() => runMigrations(db, path.resolve('_gg_data/migrations')));
-    assert.deepEqual(applied, ['004_serving_relations.mjs', '005_catalog_key_width.sql', '006_catalog_discovery.sql', '007_catalog_discovery_columns.mjs', '008_catalog_relay.sql', '009_guide_repeated_page.mjs', '010_guide_full_index_scan.sql', '011_master_realm_connections.mjs', '012_media_host.mjs', '013_guide_weekly_full_pass.sql', '014_notification_outbox.sql', '015_outbox_account_identity.mjs', '016_guide_entity_completeness.mjs', '017_catalog_completeness_reason_width.sql'], '003 is skipped by name; 005 widens it');
+    assert.deepEqual(applied, ['004_serving_relations.mjs', '005_catalog_key_width.sql', '006_catalog_discovery.sql', '007_catalog_discovery_columns.mjs', '008_catalog_relay.sql', '009_guide_repeated_page.mjs', '010_guide_full_index_scan.sql', '011_master_realm_connections.mjs', '012_media_host.mjs', '013_guide_weekly_full_pass.sql', '014_notification_outbox.sql', '015_outbox_account_identity.mjs', '016_guide_entity_completeness.mjs', '017_catalog_completeness_reason_width.sql', '018_catalog_manual_entries.sql'], '003 is skipped by name; 005 widens it');
     if (REAL_MYSQL) {
         const widths = await db.query("SELECT TABLE_NAME AS t, CHARACTER_MAXIMUM_LENGTH AS n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'entity_key' AND TABLE_NAME IN ('catalog_entities', 'catalog_observations') ORDER BY TABLE_NAME");
         assert.deepEqual(widths.map(w => [w.t, Number(w.n)]), [['catalog_entities', 255], ['catalog_observations', 255]]);

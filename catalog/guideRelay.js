@@ -333,6 +333,7 @@ export function createGuideRelay({ db, store, guideStore, policy = null, getPoli
                 const entityKey = key ?? (await guideStore.getIdState(kind, id, tx))?.entityKey ?? String(id);
                 await guideStore.markDetail(kind, id, { outcome: out, hash }, currentPolicy, tx);
                 if (key) await guideStore.setEntityKey(kind, id, key, tx);
+                if (out === 'ok' && key) await tx.query('DELETE FROM catalog_manual_entries WHERE entity_kind = ? AND entity_id = ?', [kind, id]);
                 touched.push([kind, entityKey]);
                 summary.details++;
             }

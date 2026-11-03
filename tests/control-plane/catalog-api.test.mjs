@@ -314,3 +314,79 @@ test('AC-CAT-008: dashboard state (SSE) carries catalog jobs and guide status', 
     assert.equal(state.json.catalog.guide.length, 6);
     assert.equal(state.json.catalog.available.guide_discovery, null);
 });
+
+test('manual creation accepts only an ID for every Guide kind and exposes incomplete browse/detail records', async () => {
+    const { cookie, csrf } = await session();
+    const fields = await req('GET', '/api/catalog/manual-fields', { cookie });
+    assert.deepEqual(Object.keys(fields.json.kinds).sort(), ['creature', 'item', 'master_realm', 'quest', 'realm', 'relic']);
+    for (const [index, kind] of ['item', 'creature', 'realm', 'master_realm', 'relic', 'quest'].entries()) {
+        const id = 910000 + index;
+        const body = { kind, record: { id } };
+        const created = await req('POST', '/api/catalog/manual-entries', { cookie, csrf, body });
+        assert.equal(created.status, 201, JSON.stringify(created.json));
+        const detail = await req('GET', `/api/catalog/entities/${kind}/${created.json.key}`, { cookie });
+        assert.equal(detail.status, 200, JSON.stringify(detail.json));
+        assert.equal(detail.json.fields.id, id);
+        assert.equal(detail.json.catalog.completeness, 'incomplete');
+        assert.equal(detail.json.catalog.verifiedAt, null);
+        assert.equal(detail.json.guide.status, 'pending');
+        const list = await req('GET', `/api/catalog/entities?kind=${kind}&completeness=incomplete&pageSize=100`, { cookie });
+        assert.equal(list.status, 200, JSON.stringify(list.json));
+        assert.ok(list.json.items.some(r => r.key === created.json.key));
+        const summary = await req('GET', '/api/catalog/summary', { cookie });
+        assert.ok(summary.json.kinds[kind].incomplete >= 1);
+        assert.equal((await req('POST', '/api/catalog/manual-entries', { cookie, csrf, body })).status, 409);
+    }
+    assert.equal((await lastAudit()).action, 'catalog.manual.create');
+});
+
+test('manual creation rejects invalid fields and requires owner session, origin and CSRF', async () => {
+    const body = { kind: 'item', record: { id: 920000 } };
+    assert.equal((await req('POST', '/api/catalog/manual-entries', { body })).status, 401);
+    const { cookie, csrf } = await session();
+    assert.equal((await req('POST', '/api/catalog/manual-entries', { cookie, body })).status, 403);
+    assert.equal((await req('POST', '/api/catalog/manual-entries', { cookie, csrf, origin: 'http://evil.example', body })).status, 403);
+    for (const invalid of [
+        { kind: 'unknown', record: { id: 920000 } }, { kind: 'item', record: {} },
+        { kind: 'item', record: { id: '920000' } }, { kind: 'item', record: { id: 0 } },
+        { kind: 'item', record: { id: 10000001 } }, { kind: 'item', record: { id: 920000, unknown: true } },
+        { kind: 'item', record: { id: 920000, stats: [] } },
+        { kind: 'realm', record: { id: 920000, minLevel: 2147483648 } },
+        { kind: 'item', record: { id: 920000, imageUrl: 'javascript:alert(1)' } },
+        { ...body, complete: true },
+    ]) assert.equal((await req('POST', '/api/catalog/manual-entries', { cookie, csrf, body: invalid })).status, 400, JSON.stringify(invalid));
+    assert.deepEqual(await db.query('SELECT id FROM items WHERE id = ?', [920000]), []);
+});
+
+test('manual creation keeps optional fields and supplied relationships', async () => {
+    const { cookie, csrf } = await session();
+    const record = { id: 930000, name: 'Manual creature', description: 'Seen in game', stats: { level: 10 },
+        realms: [{ realmId: 930001, realmName: 'Manual realm' }], droppedItems: [{ itemId: 930002, itemName: 'Manual drop' }] };
+    const created = await req('POST', '/api/catalog/manual-entries', { cookie, csrf, body: { kind: 'creature', record } });
+    assert.equal(created.status, 201, JSON.stringify(created.json));
+    const detail = await req('GET', '/api/catalog/entities/creature/930000', { cookie });
+    assert.equal(detail.json.fields.description, record.description);
+    assert.deepEqual(detail.json.fields.stats, record.stats);
+    assert.deepEqual(detail.json.relations.realms, [{ id: 930001, name: 'Manual realm' }]);
+    assert.deepEqual(detail.json.relations.drops, [{ id: 930002, name: 'Manual drop' }]);
+    assert.equal(detail.json.catalog.completeness, 'incomplete');
+});
+
+test('manual relic and quest fields are searchable and their pending entries support previewed rollback', async () => {
+    const { cookie, csrf } = await session();
+    const record = { id: 940000, name: 'New quest', realmId: 940001, minLevel: 10,
+        sections: [{ heading: 'Description', text: 'An event quest.' }] };
+    const created = await req('POST', '/api/catalog/manual-entries', { cookie, csrf, body: { kind: 'quest', record } });
+    assert.equal(created.status, 201);
+    const detail = await req('GET', `/api/catalog/entities/quest/${created.json.key}`, { cookie });
+    assert.deepEqual(detail.json.fields, record);
+    const search = await req('GET', '/api/catalog/entities?kind=quest&q=new&completeness=incomplete&pageSize=1', { cookie });
+    assert.equal(search.json.total, 1);
+    assert.equal(search.json.items[0].key, created.json.key);
+    const plan = await catalogStore.planRollback(created.json.runId);
+    assert.equal(plan.expectedCounts.remove, 1);
+    assert.deepEqual(plan.expectedCounts.rows, { catalog_manual_entries: -1 });
+    assert.equal((await req('GET', `/api/catalog/entities/quest/${created.json.key}`, { cookie })).status, 200, 'preview changes nothing');
+    await catalogStore.executePlan(plan.id, { confirmation: plan.confirmation });
+    assert.equal((await req('GET', `/api/catalog/entities/quest/${created.json.key}`, { cookie })).status, 404);
+});

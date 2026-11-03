@@ -91,6 +91,7 @@
         "Complete" means the Guide detail, required stored fields, and known drop links were checked. Every index page is scanned on each scheduled pass, regardless of known IDs.</p>
       <nav class="subtabs" aria-label="Catalog views">
         <button type="button" data-subtab="browse" class="active">Browse</button>
+        <button type="button" data-subtab="manual">Add manually</button>
         <button type="button" data-subtab="sync">Sync</button>
         <button type="button" data-subtab="seed">Seed</button>
         <button type="button" data-subtab="history">History &amp; delete</button>
@@ -119,6 +120,21 @@
         </div>
         <div class="pager"><button type="button" class="ghost" id="cf-prev">Previous</button><span id="cf-page" class="muted"></span><button type="button" class="ghost" id="cf-next">Next</button></div>
         <div id="catalog-detail" class="card" hidden></div>
+      </div>
+
+      <div id="catalog-manual" class="subtab" hidden>
+        <h3>Add a catalog entry</h3>
+        <p class="muted">Only the Guide ID is required. All other Guide fields are optional. Manual entries start incomplete; scheduled Guide checks fill and verify their information when it becomes available. Existing IDs cannot be overwritten here.</p>
+        <form id="manual-entry-form" class="card" autocomplete="off">
+          <label for="mf-kind">Kind</label>
+          <select id="mf-kind">
+            <option value="item" selected>Item</option><option value="creature">Creature</option><option value="realm">Realm</option>
+            <option value="master_realm">Master realm</option><option value="relic">Relic</option><option value="quest">Quest</option>
+          </select>
+          <div id="manual-entry-fields" class="manual-fields"></div>
+          <p class="error field-error" role="alert" hidden></p>
+          <button type="submit" id="manual-entry-save">Add incomplete entry</button>
+        </form>
       </div>
 
       <div id="catalog-sync" class="subtab" hidden>

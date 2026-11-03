@@ -17,8 +17,8 @@ const S = {
     str: max => v => typeof v === 'string' && v.length >= 1 && v.length <= max && !CONTROL.test(v),
     opt: f => v => v === null || v === undefined || f(v),
     arr: (f, max) => v => Array.isArray(v) && v.length <= max && v.every(f),
-    obj: (shape, required = []) => v => isPlain(v) && Object.keys(v).every(k => Object.hasOwn(shape, k))
-        && required.every(k => v[k] !== undefined) && Object.entries(v).every(([k, x]) => shape[k](x)),
+    obj: (shape, required = []) => Object.assign(v => isPlain(v) && Object.keys(v).every(k => Object.hasOwn(shape, k))
+        && required.every(k => v[k] !== undefined) && Object.entries(v).every(([k, x]) => shape[k](x)), { shape }),
     url: v => {
         if (typeof v !== 'string' || v.length > 512) return false;
         try { const u = new URL(v); return u.protocol === 'https:' && /(^|\.)fallensword\.com$/i.test(u.hostname) && !u.username && !u.password; } catch { return false; }
@@ -65,6 +65,23 @@ export const RECORD_SCHEMAS = Object.freeze({
 
 export const indexEntry = S.obj({ id: S.id, name: S.opt(S.str(191)) }, ['id']);
 
+/** Validates optional manual fields with the Guide validators; only ID is required.
+ * @param {string} kind Guide entity kind.
+ * @param {object} record User-supplied Guide fields.
+ * @returns {boolean} Whether the manual record is valid.
+ */
+export function validManualRecord(kind, record) {
+    return Boolean(RECORD_SCHEMAS[kind] && S.obj(RECORD_SCHEMAS[kind].shape, ['id'])(record)
+        && (record.minLevel == null || record.minLevel >= -2147483648 && record.minLevel <= 2147483647));
+}
+
+/** Field names accepted by the manual form, kept in sync with Guide validation.
+ * @returns {object} Fields grouped by Guide entity kind.
+ */
+export function manualRecordFields() {
+    return Object.fromEntries(Object.entries(RECORD_SCHEMAS).map(([kind, schema]) => [kind, Object.keys(schema.shape)]));
+}
+
 const compact = o => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined));
 
 /**
@@ -76,6 +93,15 @@ const compact = o => Object.fromEntries(Object.entries(o).filter(([, v]) => v !=
 export function normalizeGuideRecord(kind, record, expectedId) {
     const schema = RECORD_SCHEMAS[kind];
     if (!schema || !schema(record) || record.id !== expectedId) return null;
+    return mapGuideRecord(kind, record);
+}
+
+/** Maps a partial, validated manual record to serving observations.
+ * @param {string} kind Guide entity kind.
+ * @param {object} record Validated partial Guide record.
+ * @returns {object} Observations and references; natural kinds require name and realmId.
+ */
+export function mapGuideRecord(kind, record) {
     const hash = sha256(canonicalJson(record));
     const observations = [];
     const references = [];
@@ -90,11 +116,11 @@ export function normalizeGuideRecord(kind, record, expectedId) {
             id: record.id, name: record.name, imageUrl: record.imageUrl, description: record.description, stats: record.stats,
             enhancements: record.enhancements, droppedItems: record.droppedItems,
         }) });
-        for (const d of record.droppedItems) {
+        for (const d of record.droppedItems ?? []) {
             references.push({ kind: 'item', id: d.itemId, name: d.itemName ?? null });
             relations.push({ type: 'creature_drop', creature_id: record.id, item_id: d.itemId });
         }
-        for (const r of record.realms) {
+        for (const r of record.realms ?? []) {
             references.push({ kind: 'realm', id: r.realmId, name: r.realmName ?? null });
             relations.push({ type: 'realm_creature', realm_id: r.realmId, creature_id: record.id });
         }
@@ -102,25 +128,25 @@ export function normalizeGuideRecord(kind, record, expectedId) {
         observations.push({ kind: 'realm', payload: compact({
             id: record.id, name: record.name, min_level: record.minLevel, shops: record.shops, connections: record.stairways,
         }) });
-        for (const relic of record.relics) {
+        for (const relic of record.relics ?? []) {
             const name = typeof relic === 'string' ? relic : relic.relicName;
             observations.push({ kind: 'relic', payload: { realm_id: record.id, name } });
             if (typeof relic !== 'string') references.push({ kind: 'relic', id: relic.relicId, name, entityKey: `${record.id}:${name}`, realmId: record.id });
         }
-        for (const q of record.quests) {
+        for (const q of record.quests ?? []) {
             observations.push({ kind: 'quest', payload: { realm_id: record.id, name: q.questName } });
             references.push({ kind: 'quest', id: q.questId, name: q.questName, entityKey: `${record.id}:${q.questName}`, realmId: record.id });
         }
-        for (const c of record.creatures) {
+        for (const c of record.creatures ?? []) {
             references.push({ kind: 'creature', id: c.creatureId, name: c.creatureName ?? null });
             relations.push({ type: 'realm_creature', realm_id: record.id, creature_id: c.creatureId });
         }
-        for (const target of record.stairways) references.push({ kind: 'realm', id: target.targetRealmId, name: target.targetRealmName ?? null });
+        for (const target of record.stairways ?? []) references.push({ kind: 'realm', id: target.targetRealmId, name: target.targetRealmName ?? null });
     } else if (kind === 'master_realm') {
-        observations.push({ kind: 'master_realm', payload: {
+        observations.push({ kind: 'master_realm', payload: compact({
             id: record.id, name: record.name, connected_realms: record.realms,
-        } });
-        for (const r of record.realms) {
+        }) });
+        for (const r of record.realms ?? []) {
             observations.push({ kind: 'realm', payload: { id: r.realmId, master_realm_id: record.id } });
             references.push({ kind: 'realm', id: r.realmId, name: r.realmName ?? null });
         }

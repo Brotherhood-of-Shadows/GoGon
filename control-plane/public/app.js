@@ -298,6 +298,41 @@ async function loadOutbox() {
 // Every catalog value is data from the game or guide: it is rendered with textContent (el()), never as
 // markup. Destructive actions show the server's plan and need its exact confirmation phrase.
 const catalogView = { kind: 'item', q: '', completeness: '', page: 1, pageSize: 25, total: 0, runsPage: 1, summary: null };
+let manualFields = null;
+const MANUAL_NUMBERS = new Set(['id', 'setId', 'minLevel', 'realmId']);
+const MANUAL_JSON = new Set(['stats', 'enhancements', 'droppedBy', 'setBonuses', 'droppedItems', 'realms', 'shops', 'relics', 'quests', 'creatures', 'stairways', 'sections']);
+const MANUAL_EXAMPLES = {
+    stats: '{"level": 10, "attack": 20}', enhancements: '[]', droppedBy: '[{"creatureName":"Golem","dropRate":1}]',
+    setBonuses: '{"attack": 10}', droppedItems: '[{"itemId":123,"itemName":"Sword"}]',
+    realms: '[{"realmId":123,"realmName":"Forest"}]', shops: '[{"shopId":123,"shopName":"Supplies"}]',
+    relics: '[{"relicId":123,"relicName":"Stone"}]', quests: '[{"questId":123,"questName":"Find the stone"}]',
+    creatures: '[{"creatureId":123,"creatureName":"Golem"}]', stairways: '[{"targetRealmId":123,"targetRealmName":"Forest"}]',
+    sections: '[{"heading":"Rewards","text":"100 XP"}]',
+};
+
+async function loadManualForm() {
+    try {
+        if (!manualFields) manualFields = (await api('GET', '/api/catalog/manual-fields')).kinds;
+        renderManualFields();
+    } catch (e) { showBanner(fieldMessage(e)); }
+}
+
+function renderManualFields() {
+    const kind = document.getElementById('mf-kind').value;
+    if (!manualFields?.[kind]) return;
+    document.getElementById('manual-entry-fields').replaceChildren(...manualFields[kind].map(name => {
+        const json = MANUAL_JSON.has(name);
+        const label = name.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
+        const input = el(json || name === 'description' ? 'textarea' : 'input', {
+            id: `mf-${name}`, name, required: name === 'id',
+            ...(json ? { rows: 3, placeholder: name === 'stats' && kind === 'creature' ? '{"level":10,"attack":{"min":10,"max":20}}' : MANUAL_EXAMPLES[name] }
+                : MANUAL_NUMBERS.has(name) ? { type: 'number', min: name === 'minLevel' ? 0 : 1, max: name === 'minLevel' ? 2147483647 : 10000000, step: 1 }
+                    : { type: 'text', maxLength: name === 'description' ? 8192 : name === 'imageUrl' ? 512 : 191 }),
+        });
+        return el('div', {}, el('label', { htmlFor: input.id }, `${label}${json ? ' (JSON)' : ''}${name === 'id' ? ' *' : ''}`), input);
+    }));
+    document.querySelector('#manual-entry-form .field-error').hidden = true;
+}
 const REASON_LABELS = {
     guide_detail_missing: 'guide detail not read yet',
     guide_detail_failed: 'guide detail failed validation',
@@ -374,7 +409,7 @@ async function loadEntities() {
     const v = catalogView;
     const params = new URLSearchParams({ kind: v.kind, page: String(v.page), pageSize: String(v.pageSize) });
     if (v.q) params.set('q', v.q);
-    if (v.completeness && (v.kind === 'item' || v.kind === 'creature')) params.set('completeness', v.completeness);
+    if (v.completeness) params.set('completeness', v.completeness);
     let data;
     try { data = await api('GET', `/api/catalog/entities?${params}`); } catch (e) { showBanner(fieldMessage(e)); return; }
     v.total = data.total;
@@ -556,7 +591,7 @@ async function loadSeeds() {
     }));
 }
 
-const CATALOG_LOADERS = { browse: () => loadEntities(), sync: () => loadCatalogSummary(), seed: () => loadSeeds(), history: () => loadRuns() };
+const CATALOG_LOADERS = { browse: () => loadEntities(), manual: () => loadManualForm(), sync: () => loadCatalogSummary(), seed: () => loadSeeds(), history: () => loadRuns() };
 
 function openCatalogTab(name) {
     document.querySelectorAll('.subtabs button').forEach(b => b.classList.toggle('active', b.dataset.subtab === name));
@@ -602,6 +637,31 @@ document.querySelectorAll('.tabs button').forEach(button => button.addEventListe
 document.querySelectorAll('.subtabs button').forEach(button => button.addEventListener('click', () => openCatalogTab(button.dataset.subtab)));
 
 const fieldValue = id => document.getElementById(id).value;
+
+document.getElementById('mf-kind').addEventListener('change', renderManualFields);
+document.getElementById('manual-entry-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const error = event.currentTarget.querySelector('.field-error');
+    const save = document.getElementById('manual-entry-save');
+    error.hidden = true;
+    save.disabled = true;
+    try {
+        const kind = fieldValue('mf-kind');
+        const record = {};
+        for (const name of manualFields[kind]) {
+            const value = fieldValue(`mf-${name}`).trim();
+            if (!value) continue;
+            if (MANUAL_JSON.has(name)) {
+                try { record[name] = JSON.parse(value); } catch { throw new Error(`${name} must be valid JSON.`); }
+            } else record[name] = MANUAL_NUMBERS.has(name) ? Number(value) : value;
+        }
+        await api('POST', '/api/catalog/manual-entries', { kind, record });
+        renderManualFields();
+        showBanner(`${kind.replace('_', ' ')} #${record.id} added as incomplete. Guide checks will complete its information when available.`, 'ok');
+        await loadCatalogSummary();
+    } catch (e) { error.textContent = fieldMessage(e); error.hidden = false; }
+    finally { save.disabled = false; }
+});
 
 document.getElementById('catalog-filter').addEventListener('submit', (event) => {
     event.preventDefault();

@@ -238,6 +238,7 @@ export function createControlPlane({ config, store, engine, switcher, rebind = a
         const svc = catalog.service;
         let match;
         try {
+            if (p === '/api/catalog/manual-fields') { queryOnly(url, []); return send(res, 200, { kinds: svc.manualFields() }); }
             if (p === '/api/catalog/summary') { queryOnly(url, []); return send(res, 200, await svc.summary()); }
             if (p === '/api/catalog/entities') {
                 queryOnly(url, ['kind', 'q', 'completeness', 'page', 'pageSize']);
@@ -266,6 +267,18 @@ export function createControlPlane({ config, store, engine, switcher, rebind = a
         let match;
         const audit = (action, subject, outcome = 'success', detail = null) => store.audit({ actor, action, subject: String(subject).slice(0, 100), outcome, detail });
         try {
+            if (p === '/api/catalog/manual-entries') {
+                const body = await readJson(req);
+                allowOnly(body, ['kind', 'record']);
+                try {
+                    const result = await svc.addManualEntry(body);
+                    await audit('catalog.manual.create', body.kind, 'success', { runId: result.runId });
+                    return send(res, 201, { ok: true, ...result });
+                } catch (e) {
+                    if (e instanceof CatalogError) await audit('catalog.manual.create', typeof body.kind === 'string' ? body.kind : 'invalid', 'denied', { reason: e.code });
+                    throw e;
+                }
+            }
             if (p === '/api/catalog/jobs') {
                 const body = await readJson(req);
                 allowOnly(body, ['kind', 'requestBudget', 'nextItemId']);
