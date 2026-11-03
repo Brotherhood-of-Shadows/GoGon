@@ -17,6 +17,13 @@ const DEBUG_OPERATIONS = Object.freeze({
   page_account_form: 'page observed: account form', page_other: 'page observed: other',
   failure_image_saved: 'failure screenshot saved at /var/lib/gogon-sso-debug/last-failure.png (captured before lookup)',
   failure_image_unavailable: 'failure screenshot unavailable',
+  failure_image_source_missing: 'failure screenshot missing from the temporary profile',
+  failure_image_size_invalid: 'failure screenshot exceeds the size limits',
+  failure_image_decode_failed: 'failure screenshot could not be decoded or converted',
+  failure_image_format_invalid: 'failure screenshot has an unsupported image format',
+  failure_image_permission_denied: 'failure screenshot could not be saved: permission denied',
+  failure_image_read_only: 'failure screenshot could not be saved: debug directory is read-only',
+  failure_image_io_error: 'failure screenshot could not be saved: file I/O error',
 });
 
 function debugEntry(line) {

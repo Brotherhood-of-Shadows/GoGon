@@ -79,7 +79,19 @@ with tempfile.TemporaryDirectory() as directory:
     helper.FAILURE_IMAGE_DIRECTORY = saved
     events = []
     helper.preserve_failure_image(source, lambda operation, event: events.append((operation, event)))
-    assert events == [('failure_image_unavailable', 'observed')], events
+    assert events == [('failure_image_io_error', 'observed')], events
+    # Actual nodriver defaults to JPEG even when its output filename is challenge.png.
+    helper.FAILURE_IMAGE_DIRECTORY = Path(directory) / 'jpeg-snapshots'
+    (source / 'challenge.png').write_bytes(b'\\xff\\xd8\\xfffixture jpeg')
+    original = (source / 'challenge.png').read_bytes()
+    png = b'\\x89PNG\\r\\n\\x1a\\nconverted fixture'
+    sys.modules['cv2'] = types.SimpleNamespace(IMREAD_UNCHANGED=-1, error=RuntimeError,
+        imread=lambda path, mode: object(), imencode=lambda extension, image: (True, types.SimpleNamespace(tobytes=lambda: png)))
+    events.clear()
+    helper.preserve_failure_image(source, lambda operation, event: events.append((operation, event)))
+    assert events == [('failure_image_saved', 'observed')], events
+    assert (helper.FAILURE_IMAGE_DIRECTORY / 'last-failure.png').read_bytes() == png
+    assert (source / 'challenge.png').read_bytes() == original
 `;
   const actual = spawnSync('python3', ['-c', script], { encoding: 'utf8', timeout: 10_000 });
   assert.equal(actual.status, 0, actual.stderr || actual.error?.message);

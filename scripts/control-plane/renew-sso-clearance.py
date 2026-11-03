@@ -1,6 +1,7 @@
 """Clear a HuntedCow SSO challenge in the worker's Chromium, returning short-lived cookies."""
 
 import asyncio
+import errno
 import json
 import os
 import re
@@ -28,16 +29,43 @@ FAILURE_IMAGE_DIRECTORY = Path('/var/lib/gogon-sso-debug')
 
 
 def preserve_failure_image(profile_directory: Path, report: Reporter) -> None:
-    """Retain only the existing pre-interaction PNG; diagnostic I/O must not replace a login error."""
+    """Retain the existing pre-interaction image as PNG without replacing the original login error."""
     temporary_path = None
     try:
         source = profile_directory / 'challenge.png'
-        if not source.is_file() or not 8 <= source.stat().st_size <= 5 * 1024 * 1024:
-            report('failure_image_unavailable', 'observed')
+        if not source.is_file():
+            report('failure_image_source_missing', 'observed')
+            return
+        if not 8 <= source.stat().st_size <= 5 * 1024 * 1024:
+            report('failure_image_size_invalid', 'observed')
             return
         data = source.read_bytes()
+        # nodriver 0.50.3 defaults to JPEG regardless of the filename extension. Normalize the
+        # diagnostic copy after failure; leave the original capture and interaction untouched.
+        if data.startswith(b'\xff\xd8\xff'):
+            try:
+                import cv2
+            except ImportError:
+                report('failure_image_decode_failed', 'observed')
+                return
+            try:
+                image = cv2.imread(str(source), cv2.IMREAD_UNCHANGED)
+                if image is None:
+                    report('failure_image_decode_failed', 'observed')
+                    return
+                encoded, buffer = cv2.imencode('.png', image)
+                if not encoded:
+                    report('failure_image_decode_failed', 'observed')
+                    return
+                data = buffer.tobytes()
+            except cv2.error:
+                report('failure_image_decode_failed', 'observed')
+                return
         if not data.startswith(b'\x89PNG\r\n\x1a\n'):
-            report('failure_image_unavailable', 'observed')
+            report('failure_image_format_invalid', 'observed')
+            return
+        if len(data) > 5 * 1024 * 1024:
+            report('failure_image_size_invalid', 'observed')
             return
         FAILURE_IMAGE_DIRECTORY.mkdir(mode=0o700, parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=FAILURE_IMAGE_DIRECTORY, prefix='.failure-', delete=False) as target:
@@ -46,8 +74,10 @@ def preserve_failure_image(profile_directory: Path, report: Reporter) -> None:
         temporary_path.replace(FAILURE_IMAGE_DIRECTORY / 'last-failure.png')
         temporary_path = None
         report('failure_image_saved', 'observed')
-    except OSError:
-        report('failure_image_unavailable', 'observed')
+    except PermissionError:
+        report('failure_image_permission_denied', 'observed')
+    except OSError as error:
+        report('failure_image_read_only' if error.errno == errno.EROFS else 'failure_image_io_error', 'observed')
     finally:
         if temporary_path is not None:
             try:

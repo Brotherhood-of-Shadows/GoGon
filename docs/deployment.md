@@ -63,13 +63,20 @@ On a failed SSO attempt, the existing screenshot taken before the lookup is reta
 the latest PNG survives container restarts; browser profiles and cookies remain temporary. The
 image is from before the interaction, not the page at timeout. Only the latest bounded PNG is kept,
 with owner-only file permissions; failures to save it never replace the original login error.
+The capture may be JPEG despite its temporary `.png` filename: nodriver 0.50.3 defaults to JPEG.
+The diagnostic saver detects the actual bytes and converts a JPEG copy into a real PNG after
+failure. The original capture used by the helper is preserved. Save-result logs distinguish a
+missing source, unsupported/undecodable image, size limit, permission problem, read-only directory,
+and other file I/O failures.
 After the log says `failure screenshot saved`, copy it from the VPS project directory:
 
 ```sh
-docker compose cp gogon:/var/lib/gogon-sso-debug/last-failure.png ./sso-last-failure.png
+docker compose run --rm --no-deps -T --entrypoint cat gogon \
+  /var/lib/gogon-sso-debug/last-failure.png > sso-last-failure.png
 ```
 
-Inspect that image to see what the browser displayed at the start of the lookup. A successfully
+This uses a short-lived file-copy container to read the volume during the main container's restart
+loop. Inspect that image to see what the browser displayed at the start of the lookup. A successfully
 completed screenshot or image-match operation does not establish that a verification control was
 found or that the browser completed verification.
 
