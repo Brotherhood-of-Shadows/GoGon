@@ -1,9 +1,8 @@
 import { load } from 'cheerio';
 import { MAX_TOOLTIP_ITEM_ID, itemTooltipUrl } from './contracts/itemTooltip.js';
 import { MAX_RESPONSE_BYTES } from './contracts/classify.js';
+import { itemStatField, parseItemType } from './guideParsers.js';
 
-const STATS = Object.freeze({ attack: 'attack', defense: 'defense', armour: 'armor', armor: 'armor', damage: 'damage', hp: 'hp',
-    'xp gain': 'xpGain', stamina: 'stamina', 'stamina gain': 'staminaGain', 'gold gain': 'goldGain', 'min level': 'level', level: 'level' });
 const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
 
 /** A malformed tooltip is never interpreted as an unused ID. */
@@ -19,6 +18,33 @@ function numeric(value) {
     return result;
 }
 
+// Quest/resource tooltips use the compact legacy table rather than the equipment item-tip
+// classes. Require its isolated table, named font header and type row so full login/error pages
+// cannot be mistaken for items. Keep descriptive rows without inventing equipment stats/rarity.
+function compactTooltip($, id) {
+    const roots = $('body').children();
+    if (roots.length !== 1 || !roots.is('table') || roots.find('table').length) throw new ItemTooltipError();
+    const header = roots.find('tr').first().children('td');
+    const blocks = header.children('center').children('div');
+    const nameNode = blocks.first().find('nobr > font > b');
+    const name = clean(nameNode.text());
+    const typeText = clean(blocks.eq(1).text());
+    const { type, rarity } = parseItemType(typeText);
+    if (header.length !== 1 || nameNode.length !== 1 || !name || name.length > 191 || !type || type.length > 64 || (rarity?.length ?? 0) > 64 || typeText.length > 131) throw new ItemTooltipError();
+    const rows = roots.find('tr').toArray().slice(1).map(row => clean($(row).children('td').toArray().map(cell => $(cell).text()).join(' '))).filter(Boolean);
+    const headerDetails = blocks.toArray().slice(2).map(block => clean($(block).text())).filter(Boolean);
+    if (rows.length > 100 || rows.some(text => text.length > 8192) || headerDetails.length > 16 || headerDetails.some(text => text.length > 512)) throw new ItemTooltipError();
+    const record = { id, name, imageUrl: `https://cdn2.fallensword.com/items/${id}.gif`, stats: { type },
+        details: { tooltipRows: rows } };
+    if (rarity) record.rarity = rarity;
+    const color = nameNode.parent().attr('color');
+    if (/^#[0-9a-f]{6}$/i.test(color ?? '')) record.details.nameColor = color;
+    if (headerDetails.length) record.details.typeDetails = headerDetails;
+    const notes = [...new Set(roots.find('.item-tip-note').toArray().map(node => clean($(node).text())).filter(Boolean))];
+    if (notes.length) record.details.notes = notes;
+    return { found: true, record };
+}
+
 /** Parses the owner's fetchitem HTML, preserving extra tooltip fields without inventing Guide data.
  * @param {string} html Raw successful response.
  * @param {number} id Requested item ID.
@@ -29,17 +55,22 @@ export function parseItemTooltip(html, id) {
     if (html.trim() === 'Invalid Request') return { found: false };
     const $ = load(html);
     const table = $('table.item-tip');
+    if (table.length === 0) return compactTooltip($, id);
     if (table.length !== 1) throw new ItemTooltipError();
     const name = clean(table.find('.item-tip-name').text());
-    const type = clean(table.find('.item-tip-type').first().text());
-    const match = type.match(/^(.+?)\s+-\s+(.+)$/);
-    if (!name || name.length > 191 || !match || match[1].length > 64 || match[2].length > 64) throw new ItemTooltipError();
-    const record = { id, name, rarity: match[2], imageUrl: `https://cdn2.fallensword.com/items/${id}.gif`, stats: { type: match[1] }, enhancements: [], details: { tooltipSections: [] } };
+    const typeText = clean(table.find('.item-tip-type').first().text());
+    const { type, rarity } = parseItemType(typeText);
+    if (!name || name.length > 191 || !type || type.length > 64 || (rarity?.length ?? 0) > 64 || typeText.length > 131) throw new ItemTooltipError();
+    const record = { id, name, imageUrl: `https://cdn2.fallensword.com/items/${id}.gif`, stats: { type }, enhancements: [], details: { tooltipSections: [] } };
+    if (rarity) record.rarity = rarity;
     const typeDetails = table.find('.item-tip-type').toArray().slice(1).map(element => clean($(element).text())).filter(Boolean);
     if (typeDetails.length > 16 || typeDetails.some(value => value.length > 512)) throw new ItemTooltipError();
     if (typeDetails.length) record.details.typeDetails = typeDetails;
     const color = table.find('.item-tip-name font').attr('color');
     if (/^#[0-9a-f]{6}$/i.test(color ?? '')) record.details.nameColor = color;
+    const notes = table.find('.item-tip-note').toArray().map(node => clean($(node).text())).filter(Boolean);
+    if (notes.length > 100 || notes.some(text => text.length > 8192)) throw new ItemTooltipError();
+    if (notes.length) record.details.notes = [...new Set(notes)];
     let section = null;
     const pieces = [];
     for (const row of table.find('tr').toArray()) {
@@ -58,7 +89,14 @@ export function parseItemTooltip(html, id) {
         }
         const label = clean(cells.filter('.item-tip-label').text());
         const value = clean(cells.filter('.item-tip-value').text());
-        if (!label) continue;
+        if (!label) {
+            const text = clean(cells.not('.item-tip-section').text());
+            if (text && section && !(piece && /^Set Details/i.test(section.heading))) {
+                if (text.length > 8192 || section.entries.length >= 100) throw new ItemTooltipError();
+                section.entries.push({ text });
+            }
+            continue;
+        }
         if (!value || label.length > 191 || value.length > 512 || (section?.entries.length ?? 0) >= 100) throw new ItemTooltipError();
         section?.entries.push({ label, value });
         if (!section) {
@@ -66,8 +104,9 @@ export function parseItemTooltip(html, id) {
             if (record.details.otherFields.length >= 100) throw new ItemTooltipError();
             record.details.otherFields.push({ label, value });
         }
-        const field = STATS[label.toLowerCase()];
-        if (field && (!section || /^Bonuses$/i.test(section.heading) || field === 'level')) {
+        const field = itemStatField(label);
+        if (field === 'type' && value.length <= 64) record.stats.type = parseItemType(value).type;
+        else if (field && (!section || /^Bonuses$/i.test(section.heading) || field === 'level')) {
             const number = numeric(value);
             if (!Number.isSafeInteger(number)) throw new ItemTooltipError();
             record.stats[field] = number;
@@ -99,11 +138,18 @@ export function itemReleaseMessage(record, discoveredAt) {
     if (record.details.durability) fields.push({ name: 'Durability', value: `${record.details.durability.current} / ${record.details.durability.max}`, inline: true });
     const bonuses = Object.entries(record.stats).filter(([key]) => !['type', 'level'].includes(key)).map(([key, value]) => `${key.replace(/^./, c => c.toUpperCase())}: ${value >= 0 ? '+' : ''}${value}`).join('\n');
     if (bonuses) fields.push({ name: 'Bonuses', value: truncate(bonuses, 1024) });
-    if (record.enhancements.length) fields.push({ name: 'Enhancements', value: truncate(record.enhancements.map(entry => `${markdown(entry.name)}: +${entry.value}`).join('\n'), 1024) });
+    if (record.enhancements?.length) fields.push({ name: 'Enhancements', value: truncate(record.enhancements.map(entry => `${markdown(entry.name)}: +${entry.value}`).join('\n'), 1024) });
     if (record.details.setPieces?.length) fields.push({ name: 'Set pieces', value: truncate(record.details.setPieces.map(markdown).join('\n'), 1024) });
+    if (record.details.tooltipRows?.length) fields.push({ name: 'Item details', value: truncate([...new Set(record.details.tooltipRows)].map(markdown).join('\n'), 1024) });
+    else {
+        const extra = (record.details.tooltipSections ?? []).filter(section => !/^(Bonuses|Enhancements|Set Details)/i.test(section.heading))
+            .map(section => `${section.heading}: ${section.entries.map(entry => entry.text ?? `${entry.label}: ${entry.value}`).join('; ')}`);
+        extra.push(...record.details.notes ?? []);
+        if (extra.length) fields.push({ name: 'Item details', value: truncate([...new Set(extra)].map(markdown).join('\n'), 1024) });
+    }
     return { allowed_mentions: { parse: [] }, embeds: [{
         title: truncate(`New item discovered: ${record.name}`, 256), url: itemTooltipUrl(record.id),
-        description: `${markdown(record.stats.type)} • ${markdown(record.rarity)}\nGuide verification pending.`,
+        description: `${[record.stats.type, record.rarity].filter(Boolean).map(markdown).join(' • ')}\nGuide verification pending.`,
         color: record.details.nameColor ? Number.parseInt(record.details.nameColor.slice(1), 16) : 0x2f6fde,
         thumbnail: { url: record.imageUrl }, fields, timestamp: discoveredAt,
         footer: { text: `Upcoming item #${record.id}` },

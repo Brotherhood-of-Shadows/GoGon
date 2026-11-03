@@ -144,6 +144,9 @@ came from, and every change it makes to the tables Discord reads can be rolled b
   changes. Discord retries use the existing Notifications outbox. Transient errors, unknown HTML,
   login pages and challenges preserve progress; only a successful `Invalid Request` response means
   an unused ID. Known-item checks before and after a pass detect game maintenance.
+  Modern and compact tooltips share type/stat handling with the Guide extractor. Resources, quest
+  items, potions, recipes, components, fragments and equipment need no rarity field. Missing fields
+  remain unknown; usage, recipe, ingredient and component text is retained in item details.
 - **Seed (optional, recommended first).** *Stage fsdatabase* downloads the same snapshot `populate_db.mjs`
   uses and records it without touching the serving tables. Promote each part in order: *Preview promotion*
   shows the exact row changes, and you type the phrase it shows to apply it. Promoted parts can be rolled

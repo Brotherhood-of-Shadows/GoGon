@@ -21,3 +21,7 @@ response (Cuirass of Encillious), formatted for readability. The owner also supp
 negative response `Invalid Request`. These attest the dedicated HTML Item releases reader;
 they do not attest the legacy JSON game frontier. Tests use fixtures and block live game/Discord
 requests.
+
+`item-tooltip-quest.html` is the owner's follow-up response for item 17069, Twangy Core.
+Its compact table has a Quest type and usage/recipe notes, with no `item-tip` table class,
+rarity or equipment fields. It covers both the known-item probe and new item discovery.

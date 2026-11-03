@@ -14,6 +14,7 @@ import { GUIDE_POLICY } from '../../catalog/contracts/policy.js';
 
 after(closeClients);
 const sample = readFileSync('tests/catalog-sync/fixtures/item-tooltip.html', 'utf8');
+const questSample = readFileSync('tests/catalog-sync/fixtures/item-tooltip-quest.html', 'utf8');
 const hook = 'https://discord.com/api/webhooks/0/fixture-upcoming';
 const tooltip = id => sample.replaceAll('Cuirass of Encillious', `Discovered item ${id}`);
 const response = (body, status = 200, headers = {}) => new Response(body, { status, headers: { 'content-type': 'text/html', ...headers } });
@@ -101,6 +102,33 @@ test('bounded scans resume persisted progress across worker restarts and finish 
     assert.equal(result.lastCheckedId, 118);
     assert.equal((await store.state()).discoveredTotal, 2);
     assert.equal((await db.query('SELECT * FROM notification_outbox')).length, 2);
+});
+
+test('first-run compact Quest baseline no longer loops in backoff; mixed new items advance and announce provisionally', async () => {
+    const { worker, store, env, db, calls, clock } = await setup();
+    env.intercept = id => id === 17069 || id === 17071 ? response(questSample) : id === 17074 ? response(tooltip(id)) : null;
+    // Reproduce the existing deployment: its failed first probe has already scheduled backoff.
+    const started = await store.begin();
+    await store.fail(started.scanId, 'unrecognized_tooltip', 120_000, { resetTail: true });
+    clock.t += 120_001;
+    const result = await worker.run();
+    assert.equal(result.status, 'complete');
+    assert.equal(result.lastValidId, 17074);
+    assert.equal(result.lastCheckedId, 17084);
+    assert.equal(result.announced, 2);
+    assert.equal(calls[0], 17069);
+    assert.equal((await store.state()).lastError, null);
+    const [quest] = await db.query('SELECT name, stats, rarity, enhancements, details FROM items WHERE id = 17071');
+    assert.equal(quest.name, 'Twangy Core');
+    assert.deepEqual(JSON.parse(quest.stats), { type: 'Quest' });
+    assert.equal(quest.rarity, null);
+    assert.equal(quest.enhancements, null);
+    assert.deepEqual(JSON.parse(quest.details).notes, ['Used in recipes']);
+    const [entity] = await db.query("SELECT completeness FROM catalog_entities WHERE entity_kind = 'item' AND entity_key = '17071'");
+    assert.equal(entity.completeness, 'incomplete');
+    const notifications = await db.query('SELECT event_id, payload FROM notification_outbox ORDER BY event_id');
+    assert.deepEqual(notifications.map(row => row.event_id), ['17071', '17074']);
+    assert.equal(JSON.parse(notifications[0].payload).embeds[0].description, 'Quest\nGuide verification pending.');
 });
 
 test('maintenance, auth, challenge, network and malformed replies preserve the cursor and use backoff', async () => {

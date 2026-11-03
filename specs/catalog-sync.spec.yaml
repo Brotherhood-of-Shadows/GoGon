@@ -4,7 +4,7 @@
 spec:
   id: "catalog-sync-v1"
   status: locked
-  version: "1.9.0"
+  version: "1.9.1"
   created: "2026-09-25"
   updated: "2026-11-03"
 
@@ -13,6 +13,10 @@ spec:
     depends_on: ["data-model", "api-surface", "security"]
 
   changelog:
+    - version: "1.9.1"
+      date: "2026-11-03"
+      changes:
+        - "Owner-provided item 17069 Twangy Core uses a compact Quest tooltip without item-tip classes or rarity. Accept that isolated named/type table alongside modern tooltips, sharing type/stat-label handling with the Guide extractor. Support resources, quest items, potions, recipes, components, fragments and equipment without requiring rarity. Retain descriptive/recipe/ingredient/component sections and leave absent fields unknown. Regression starts from the deployed unrecognized_tooltip backoff and verifies the Quest baseline, mixed discoveries, ten-negative stopping boundary and provisional announcements."
     - version: "1.9.0"
       date: "2026-11-03"
       changes:

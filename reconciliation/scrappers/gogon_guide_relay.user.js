@@ -229,13 +229,34 @@
         'XP Gain': 'xpGain', Stamina: 'stamina', 'Stamina Gain': 'staminaGain', 'Gold Gain': 'goldGain',
     };
 
+    /** Resolves a Guide/game item stat label without restricting the item's type.
+     * @param {string} label Visible label.
+     * @returns {string|null} Shared catalog stat field.
+     */
+    function itemStatField(label) {
+        const normalized = String(label ?? '').trim().replace(/:$/, '').trim().toLowerCase();
+        if (normalized === 'min level') return 'level';
+        if (normalized === 'armour') return 'armor';
+        return Object.entries(STAT_LABELS).find(([name]) => name.toLowerCase() === normalized)?.[1] ?? null;
+    }
+
+    /** Reads any item type, with an optional rarity suffix; Quest/Resource need no rarity.
+     * @param {string} value Visible type or type/rarity header.
+     * @returns {{type: string|null, rarity: string|null}} Optional catalog fields.
+     */
+    function parseItemType(value) {
+        const text = cleanText(value, 300);
+        const match = text?.match(/^(.+?)\s+-\s+(.+)$/);
+        return { type: match ? match[1] : text, rarity: match ? match[2] : null };
+    }
+
     function readStats(cells, into) {
         for (let i = 0; i + 1 < cells.length; i += 2) {
             const label = cleanText(cells[i].textContent)?.replace(/:$/, '');
-            const key = STAT_LABELS[label];
+            const key = itemStatField(label);
             if (!key) continue;
             const raw = cleanText(cells[i + 1].textContent, 64);
-            into[key] = key === 'type' ? raw : toInt(raw);
+            into[key] = key === 'type' ? parseItemType(raw).type : toInt(raw);
         }
     }
 
