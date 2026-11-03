@@ -141,6 +141,151 @@ test('manual records stay incomplete through missing pages and become fulfilled 
     assert.deepEqual(await db.query('SELECT * FROM catalog_manual_entries'), []);
 });
 
+test('Guide refresh follows an edited quest identity and fills omitted data; rollback restores the old identity', async () => {
+    const ctx = await setup();
+    const { db, store, guideStore, clock } = ctx;
+    const service = createCatalogService({ db, store, guideStore });
+    await enableJob(store);
+    await ctx.drain();
+    const oldKey = (await guideStore.getIdState('quest', 501)).entityKey;
+    const initial = await service.getEditingRecord('quest', oldKey);
+    const first = await service.editEntity('quest', oldKey, { version: initial.version, record: { name: 'First correction' } });
+    const plan = await store.planRollback(first.runId);
+    await store.executePlan(plan.id, { confirmation: plan.confirmation });
+    assert.equal((await guideStore.getIdState('quest', 501)).entityKey, oldKey);
+    assert.equal((await service.getEntity('quest', oldKey)).fields.name, initial.record.name);
+    const current = await service.getEditingRecord('quest', oldKey);
+    const saved = await service.editEntity('quest', oldKey, { version: current.version, record: { name: 'Corrected event quest' }, fieldStates: { name: 'do_not_check', sections: 'incomplete' } });
+    assert.equal((await guideStore.getIdState('quest', 501)).entityKey, saved.key);
+    await guideStore.setEntityKey('quest', 501, oldKey); // A relay finishing concurrently can still report the previous identity.
+    await ctx.drain();
+    const detail = await service.getEntity('quest', saved.key);
+    assert.equal(detail.fields.name, 'Corrected event quest');
+    assert.equal(detail.catalog.completeness, 'complete');
+    await assert.rejects(service.getEntity('quest', oldKey), { code: 'not_found' });
+    await assert.rejects(store.planRollback(saved.runId), { code: 'conflict' }, 'undo cannot discard newer Guide data');
+    clock.t += GUIDE_POLICY.detailRefreshAfterMs + 1;
+});
+
+test('field labels protect realms and descriptions while the Guide fills only incomplete stats', async () => {
+    const ctx = await setup();
+    const { db, store, guideStore, clock } = ctx;
+    const service = createCatalogService({ db, store, guideStore });
+    await enableJob(store);
+    await ctx.drain();
+    const before = await service.getEditingRecord('creature', '7001');
+    const saved = await service.editEntity('creature', '7001', { version: before.version,
+        record: { description: 'Owner description', stats: { level: 999 }, realms: [{ realmId: 7071, realmName: 'PONNATION GLACIER (GRAVE)' }] },
+        fieldStates: { description: 'do_not_check', 'stats.level': 'incomplete', realms: 'complete' },
+    });
+    assert.equal((await service.getEntity('creature', '7001')).fields.stats.level, 999, 'manual values appear immediately');
+    await ctx.drain();
+    const after = await service.getEntity('creature', '7001');
+    assert.equal(after.fields.description, 'Owner description');
+    assert.equal(after.fields.stats.level, 5);
+    assert.deepEqual(after.relations.realms, [{ id: 7071, name: 'PONNATION GLACIER (GRAVE)' }]);
+    assert.equal(after.catalog.completeness, 'complete');
+    const labels = (await service.getEditingRecord('creature', '7001')).fieldStates;
+    assert.deepEqual(labels, { description: 'do_not_check', realms: 'complete', 'stats.level': 'complete' });
+    // A different Guide page naming the creature cannot add a location to its locked field.
+    await store.ingest({ mode: 'guide_discovery', source: 'guide_baseline', observations: [{ kind: 'relation', payload: { type: 'realm_creature', realm_id: 1200, creature_id: 7001 } }] });
+    assert.deepEqual((await service.getEntity('creature', '7001')).relations.realms, after.relations.realms);
+    const current = await service.getEditingRecord('creature', '7001');
+    await service.editEntity('creature', '7001', { version: current.version, record: {}, fieldStates: { realms: 'incomplete' } });
+    await ctx.drain();
+    const unlocked = await service.getEntity('creature', '7001');
+    assert.deepEqual(unlocked.relations.realms, [{ id: 1200, name: 'Mountain Path' }]);
+    assert.equal(unlocked.fields.description, 'Owner description');
+    const currentAgain = await service.getEditingRecord('creature', '7001');
+    await service.editEntity('creature', '7001', { version: currentAgain.version, record: { stats: { ...currentAgain.record.stats, attack: { min: 1, max: 2 } } }, fieldStates: { 'stats.attack.min': 'incomplete', 'stats.attack.max': 'incomplete' } });
+    await ctx.drain();
+    assert.equal((await service.getEditingRecord('creature', '7001')).fieldStates['stats.attack.min'], 'incomplete', 'a Guide page without that field does not claim it was completed');
+    clock.t += GUIDE_POLICY.detailRefreshAfterMs + 1;
+    assert.ok((await guideStore.dueDetails('creature', 50)).includes(7001));
+    assert.ok(saved.runId);
+});
+
+test('field label changes can be undone and required fields marked Do not check do not cause endless refreshes', async () => {
+    const ctx = await setup();
+    const { db, store, guideStore } = ctx;
+    const service = createCatalogService({ db, store, guideStore });
+    await enableJob(store);
+    await ctx.drain();
+    const original = await service.getEditingRecord('item', '17048');
+    const edit = await service.editEntity('item', '17048', { version: original.version, record: { name: null }, fieldStates: { name: 'do_not_check' } });
+    const plan = await store.planRollback(edit.runId);
+    await store.executePlan(plan.id, { confirmation: plan.confirmation });
+    assert.equal((await service.getEditingRecord('item', '17048')).record.name, original.record.name);
+    assert.deepEqual((await service.getEditingRecord('item', '17048')).fieldStates, original.fieldStates);
+    const restored = await service.getEditingRecord('item', '17048');
+    const requestsBefore = ctx.site.requests.length;
+    await service.editEntity('item', '17048', { version: restored.version, record: { name: null }, fieldStates: { name: 'do_not_check' } });
+    await ctx.drain();
+    const after = await service.getEntity('item', '17048');
+    assert.equal(after.fields.name, null);
+    assert.equal(after.catalog.completeness, 'complete');
+    assert.equal(ctx.site.requests.length, requestsBefore, 'protecting a field does not queue a verified record again');
+    const next = await service.getEditingRecord('item', '17048');
+    await service.editEntity('item', '17048', { version: next.version, record: { droppedBy: [{ creatureName: 'Unlisted event creature', dropRate: 0.25 }] }, fieldStates: { droppedBy: 'do_not_check', 'stats.level': 'incomplete' } });
+    await ctx.drain();
+    const protectedDrop = await service.getEntity('item', '17048');
+    assert.deepEqual(protectedDrop.fields.droppedBy, [{ creatureName: 'Unlisted event creature', dropRate: 0.25 }]);
+    assert.equal(protectedDrop.catalog.completeness, 'complete', 'excluded drop references do not force endless Guide retries');
+});
+
+test('Guide rollback restores incomplete owner values and their labels together', async () => {
+    const ctx = await setup();
+    const { db, store, guideStore } = ctx;
+    const service = createCatalogService({ db, store, guideStore });
+    await service.addManualEntry({ kind: 'creature', record: { id: 7001, name: 'Owner placeholder', stats: { level: 999 } } });
+    await enableJob(store);
+    await ctx.drain();
+    const current = await service.getEntity('creature', '7001');
+    assert.equal(current.fields.stats.level, 5);
+    const guideRun = current.provenance.find(entry => entry.mode === 'guide_discovery').runId;
+    const plan = await store.planRollback(guideRun);
+    await store.executePlan(plan.id, { confirmation: plan.confirmation });
+    const restored = await service.getEditingRecord('creature', '7001');
+    assert.equal(restored.record.stats.level, 999);
+    assert.equal(restored.record.name, 'Owner placeholder');
+    assert.equal(restored.fieldStates['stats.level'], 'incomplete');
+    assert.equal(restored.fieldStates.name, 'incomplete');
+});
+
+test('undoing a field protection restores genuine Guide relationships rather than the protected snapshot', async () => {
+    const ctx = await setup();
+    const { db, store, guideStore } = ctx;
+    const service = createCatalogService({ db, store, guideStore });
+    const created = await service.addManualEntry({ kind: 'creature', record: { id: 7001, name: 'Owner creature', realms: [{ realmId: 7071, realmName: 'Owner location' }] }, fieldStates: { realms: 'do_not_check' } });
+    await enableJob(store);
+    await ctx.drain();
+    assert.deepEqual((await service.getEntity('creature', '7001')).relations.realms, [{ id: 7071, name: 'Owner location' }]);
+    const plan = await store.planRollback(created.runId);
+    await store.executePlan(plan.id, { confirmation: plan.confirmation });
+    const restored = await service.getEntity('creature', '7001');
+    assert.deepEqual(restored.relations.realms, [{ id: 1200, name: 'Mountain Path' }]);
+    assert.equal((await service.getEditingRecord('creature', '7001')).fieldStates.realms, undefined);
+});
+
+test('a protected draft relic name survives Guide completion without duplicating the realm-listed identity', async () => {
+    const ctx = await setup();
+    const { db, store, guideStore } = ctx;
+    const service = createCatalogService({ db, store, guideStore });
+    await service.addManualEntry({ kind: 'relic', record: { id: 8, name: 'Owner relic name' }, fieldStates: { name: 'do_not_check' } });
+    await enableJob(store);
+    await ctx.drain();
+    const tracking = await guideStore.getIdState('relic', 8);
+    assert.equal(tracking.entityKey, '1200:Owner relic name');
+    assert.equal((await service.getEntity('relic', tracking.entityKey)).fields.name, 'Owner relic name');
+    assert.equal((await service.listEntities({ kind: 'relic' })).total, 1);
+    const current = await service.getEntity('relic', tracking.entityKey);
+    const runId = current.provenance.find(entry => entry.mode === 'guide_discovery').runId;
+    const plan = await store.planRollback(runId);
+    await store.executePlan(plan.id, { confirmation: plan.confirmation });
+    assert.equal((await service.getEntity('relic', 'manual:8')).fields.name, 'Owner relic name');
+    assert.equal((await service.getEditingRecord('relic', 'manual:8')).fieldStates.name, 'do_not_check');
+});
+
 test('CAT-TASK-014: existing snapshot items and creatures enter guide coverage due at once', async () => {
     const { db, relay, guideStore, clock } = await setup();
     await db.query('INSERT INTO items (id, name) VALUES (?, ?)', [17049, 'Snapshot item']);

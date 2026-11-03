@@ -390,3 +390,123 @@ test('manual relic and quest fields are searchable and their pending entries sup
     await catalogStore.executePlan(plan.id, { confirmation: plan.confirmation });
     assert.equal((await req('GET', `/api/catalog/entities/quest/${created.json.key}`, { cookie })).status, 404);
 });
+
+test('every catalog kind is editable; patches preserve other fields and owner corrections survive Guide projection', async () => {
+    await catalogStore.ingest({ mode: 'seed', source: 'game_session', observations: [
+        { kind: 'item', payload: { id: 950001, name: 'Old item', rarity: 'Rare', stats: { level: 1 } } },
+        { kind: 'creature', payload: { id: 950002, name: 'Old creature', description: 'Keep this', stats: { level: 2 } } },
+        { kind: 'realm', payload: { id: 950003, name: 'Old realm', min_level: 3, map_objects: { gate: { x: 2, y: 3 } } } },
+        { kind: 'realm', payload: { id: 950004, name: 'Destination' } },
+        { kind: 'master_realm', payload: { id: 950005, name: 'Old master', connected_realms: [] } },
+        { kind: 'relic', payload: { realm_id: 950003, name: 'Old relic', details: { sections: [{ heading: 'Bonuses', text: 'Attack' }] } } },
+        { kind: 'quest', payload: { realm_id: 950003, name: 'Old quest', min_level: 4, details: { sections: [{ heading: 'Rewards', text: 'Gold' }] } } },
+    ] });
+    const { cookie, csrf } = await session();
+    for (const [kind, key] of [['item', '950001'], ['creature', '950002'], ['realm', '950003'], ['master_realm', '950005'], ['relic', '950003:Old relic'], ['quest', '950003:Old quest']]) {
+        const url = `/api/catalog/entities/${kind}/${encodeURIComponent(key)}/edit`;
+        const original = await req('GET', url, { cookie });
+        assert.equal(original.status, 200, JSON.stringify(original.json));
+        const patch = { name: `Corrected ${kind}` };
+        if (kind === 'quest') patch.realmId = 950004;
+        const saved = await req('POST', url, { cookie, csrf, body: { record: patch, version: original.json.version } });
+        assert.equal(saved.status, 200, JSON.stringify(saved.json));
+        const result = await req('GET', `/api/catalog/entities/${kind}/${encodeURIComponent(saved.json.key)}`, { cookie });
+        assert.equal(result.json.fields.name, patch.name);
+        assert.equal(result.json.catalog.completeness, 'incomplete');
+        if (kind === 'creature') assert.equal(result.json.fields.description, 'Keep this');
+        if (kind === 'item') assert.deepEqual(result.json.fields.stats, { level: 1 });
+        if (kind === 'realm') assert.deepEqual(result.json.fields.map_objects, { gate: { x: 2, y: 3 } });
+        if (kind === 'quest') assert.equal(result.json.fields.realm_id, 950004);
+        assert.equal((await req('POST', `/api/catalog/entities/${kind}/${encodeURIComponent(saved.json.key)}/edit`, { cookie, csrf, body: { record: patch, version: original.json.version } })).status, 409, 'stale editor cannot overwrite');
+        if (kind === 'relic' || kind === 'quest') {
+            await catalogStore.ingest({ mode: 'guide_discovery', source: 'guide_baseline', observations: [{ kind, payload: { realm_id: 950003, name: `Old ${kind}`, details: { sections: [{ heading: 'Guide', text: 'New details' }] } } }] });
+            assert.equal((await req('GET', `/api/catalog/entities/${kind}/${encodeURIComponent(saved.json.key)}`, { cookie })).json.fields.name, patch.name);
+            assert.equal((await req('GET', `/api/catalog/entities/${kind}/${encodeURIComponent(key)}`, { cookie })).status, 404, 'renamed records are not duplicated');
+        }
+    }
+});
+
+test('creature editing replaces realms and drops, clears optional fields, and rollback restores prior links', async () => {
+    const { cookie, csrf } = await session();
+    const created = await req('POST', '/api/catalog/manual-entries', { cookie, csrf, body: { kind: 'creature', record: {
+        id: 960001, name: 'Batch creature', description: 'Remove this', stats: { level: 10 },
+        realms: [{ realmId: 960002, realmName: 'Old location' }], droppedItems: [{ itemId: 960003, itemName: 'Old drop' }],
+    } } });
+    assert.equal(created.status, 201);
+    const url = '/api/catalog/entities/creature/960001/edit';
+    const before = await req('GET', url, { cookie });
+    const realms = [{ realmId: 7071, realmName: 'PONNATION GLACIER (GRAVE)' }, { realmId: 7125, realmName: 'ONTARAC WASTES (THERMALS)' },
+        { realmId: 7136, realmName: 'ONTARAC WASTES (BARRACKS)' }, { realmId: 7041, realmName: 'TORNAK SWAMP (MARSH)' }, { realmId: 7103, realmName: 'KANARAK COAST (SOAR)' }];
+    const saved = await req('POST', url, { cookie, csrf, body: { version: before.json.version, record: { realms, droppedItems: [], description: null } } });
+    assert.equal(saved.status, 200, JSON.stringify(saved.json));
+    const after = await req('GET', '/api/catalog/entities/creature/960001', { cookie });
+    assert.deepEqual(after.json.relations.realms.map(r => r.id), realms.map(r => r.realmId).sort((a, b) => a - b));
+    assert.deepEqual(after.json.relations.drops, []);
+    assert.equal(after.json.fields.description, null);
+    assert.deepEqual(after.json.fields.stats, { level: 10 });
+    assert.deepEqual(JSON.parse((await db.query('SELECT creatures FROM realms WHERE id = ?', [960002]))[0].creatures), []);
+    const plan = await catalogStore.planRollback(saved.json.runId);
+    await catalogStore.executePlan(plan.id, { confirmation: plan.confirmation });
+    const restored = await req('GET', '/api/catalog/entities/creature/960001', { cookie });
+    assert.deepEqual(restored.json.relations.realms, [{ id: 960002, name: 'Old location' }]);
+    assert.deepEqual(restored.json.relations.drops, [{ id: 960003, name: 'Old drop' }]);
+    assert.equal(restored.json.fields.description, 'Remove this');
+});
+
+test('pending manual relics and quests can be edited and undone without requiring a realm or name', async () => {
+    const { cookie, csrf } = await session();
+    for (const kind of ['relic', 'quest']) {
+        const created = await req('POST', '/api/catalog/manual-entries', { cookie, csrf, body: { kind, record: { id: 970001 } } });
+        const url = `/api/catalog/entities/${kind}/${created.json.key}/edit`;
+        const before = await req('GET', url, { cookie });
+        const saved = await req('POST', url, { cookie, csrf, body: { version: before.json.version, record: { name: 'Event entry', realmId: 7071 } } });
+        assert.equal(saved.status, 200, JSON.stringify(saved.json));
+        assert.deepEqual((await req('GET', url, { cookie })).json.record, { id: 970001, name: 'Event entry', realmId: 7071 });
+        const plan = await catalogStore.planRollback(saved.json.runId);
+        await catalogStore.executePlan(plan.id, { confirmation: plan.confirmation });
+        assert.deepEqual((await req('GET', url, { cookie })).json.record, { id: 970001 });
+    }
+});
+
+test('editing requires session, same origin and CSRF and rejects malformed patches or changed IDs', async () => {
+    const { cookie, csrf } = await session();
+    const url = '/api/catalog/entities/item/950001/edit';
+    const initial = await req('GET', url, { cookie });
+    const body = { version: initial.json.version, record: { name: 'Changed' } };
+    assert.equal((await req('GET', url)).status, 401);
+    assert.equal((await req('POST', url, { body })).status, 401);
+    assert.equal((await req('POST', url, { cookie, body })).status, 403);
+    assert.equal((await req('POST', url, { cookie, csrf, origin: 'http://evil.example', body })).status, 403);
+    for (const bad of [{ ...body, record: { id: 999 } }, { ...body, record: { name: 5 } }, { ...body, record: { unexpected: 'x' } }, { ...body, version: 'bad' }, { ...body, extra: true },
+        { ...body, fieldStates: { name: 'unknown' } }, { ...body, fieldStates: { id: 'do_not_check' } }, { ...body, fieldStates: { 'stats.__proto__': 'complete' } }]) {
+        assert.equal((await req('POST', url, { cookie, csrf, body: bad })).status, 400, JSON.stringify(bad));
+    }
+    assert.equal((await req('GET', '/api/catalog/entities/item/9999999/edit', { cookie })).status, 404);
+});
+
+test('item drop editing, master realm metadata and generic map fields persist through owner policies', async () => {
+    const { cookie, csrf } = await session();
+    await catalogStore.ingest({ mode: 'seed', source: 'guide_baseline', observations: [
+        { kind: 'item', payload: { id: 980001, name: 'Drop item' } },
+        { kind: 'creature', payload: { id: 980002, name: 'Known dropper' } },
+        { kind: 'relation', payload: { type: 'creature_drop', creature_id: 980002, item_id: 980001 } },
+        { kind: 'master_realm', payload: { id: 980003, name: 'Master', connected_realms: [] } },
+        { kind: 'realm', payload: { id: 980004, name: 'Map realm' } },
+    ] });
+    const edit = async (kind, key, record, fieldStates = {}) => {
+        const url = `/api/catalog/entities/${kind}/${key}/edit`;
+        const current = await req('GET', url, { cookie });
+        const response = await req('POST', url, { cookie, csrf, body: { version: current.json.version, record, fieldStates } });
+        assert.equal(response.status, 200, JSON.stringify(response.json));
+        return req('GET', `/api/catalog/entities/${kind}/${response.json.key}`, { cookie });
+    };
+    const item = await edit('item', '980001', { droppedBy: [] }, { droppedBy: 'do_not_check' });
+    assert.deepEqual(item.json.relations.droppedBy, []);
+    const master = await edit('master_realm', '980003', { minLevel: 50, imageUrl: 'https://cdn.fallensword.com/masterrealms/1.png', realms: [{ realmId: 980004, realmName: 'Map realm' }] });
+    assert.equal(master.json.fields.min_level, 50);
+    assert.equal(master.json.fields.imageUrl, 'https://cdn2.fallensword.com/masterrealms/1.png');
+    const data = JSON.parse('{"gate":{"x":2,"y":3},"empty":"","__proto__":{"value":"preserved"}}');
+    const realm = await edit('realm', '980004', { mapObjects: data });
+    assert.deepEqual(realm.json.fields.map_objects, data);
+    assert.equal(realm.json.fields.master_realm_id, 980003);
+});

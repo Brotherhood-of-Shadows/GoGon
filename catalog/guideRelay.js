@@ -16,7 +16,7 @@ import { CatalogError, canonicalJson } from '../_gg_data/handler/catalogStore.js
 import { GUIDE_KINDS } from '../_gg_data/handler/guideDiscoveryStore.js';
 import { getGuidePolicy } from './guidePolicy.js';
 import { isRepeatedIndexPage } from './contracts/guide.js';
-import { normalizeGuideRecord, indexEntry } from './guideNormalizers.js';
+import { normalizeGuideRecord, mapGuideRecord, indexEntry } from './guideNormalizers.js';
 
 export const TOKEN_PREFIX = 'ggr_';
 export const SERVER_WORKER_ID = '00000000-0000-4000-8000-000000000001';
@@ -211,6 +211,7 @@ export function createGuideRelay({ db, store, guideStore, policy = null, getPoli
 
         // 1. Build observations (read-only).
         const observations = [];
+        const fieldUpdates = [];
         const detailMarks = [];     // [id, outcome, hash]
         const register = [];        // [kind, id] discovered through links
         const staged = new Set();   // `${kind}|${id}` of entities in this batch (the row will exist)
@@ -244,9 +245,17 @@ export function createGuideRelay({ db, store, guideStore, policy = null, getPoli
                 continue;
             }
             if (r.outcome !== 'ok') { detailMarks.push([r.id, r.outcome === 'missing' ? 'missing' : 'failed', null]); continue; }
-            const n = normalizeGuideRecord(kind, r.record, r.id);
-            if (!n) { detailMarks.push([r.id, 'failed', null]); continue; }
-            detailMarks.push([r.id, 'ok', n.hash, n.entityKey]);
+            const validated = normalizeGuideRecord(kind, r.record, r.id);
+            if (!validated) { detailMarks.push([r.id, 'failed', null]); continue; }
+            const prepared = await store.prepareGuideFields(kind, r.id, r.record, validated.entityKey);
+            // Keep Guide provenance faithful to the read. Owner values are applied by field policy;
+            // natural keys alone follow the owner's identity so references stay attached.
+            const projectedRecord = kind === 'relic' || kind === 'quest'
+                ? { ...r.record, name: prepared.record.name, realmId: prepared.record.realmId } : r.record;
+            const n = mapGuideRecord(kind, projectedRecord);
+            n.hash = validated.hash;
+            if (prepared.update) fieldUpdates.push(prepared.update);
+            detailMarks.push([r.id, 'ok', n.hash, await store.resolveEntityKey(kind, n.entityKey)]);
             observations.push(...n.observations);
             staged.add(`${kind}|${r.id}`);
             for (const o of n.observations) {
@@ -277,7 +286,7 @@ export function createGuideRelay({ db, store, guideStore, policy = null, getPoli
 
         // 2. Stage and project under the guide job (DEC-CAT-015), at most once per lease. A failure
         // leaves every cursor put.
-        const runId = await stage(lease, observations, prior, resultsHash);
+        const runId = await stage(lease, observations, prior, resultsHash, fieldUpdates);
 
         // 3. Move checkpoints and detail refresh times.
         const outcome = await db.transaction(async tx => {
@@ -330,16 +339,16 @@ export function createGuideRelay({ db, store, guideStore, policy = null, getPoli
             else if (detailLease && !s.sweepMode && s.status === 'challenged') await set({ status: 'idle', statusReason: null });
             const touched = [];
             for (const [id, out, hash, key] of detailMarks) {
-                const entityKey = key ?? (await guideStore.getIdState(kind, id, tx))?.entityKey ?? String(id);
+                const entityKey = key ? await store.resolveEntityKey(kind, key) : (await guideStore.getIdState(kind, id, tx))?.entityKey ?? String(id);
                 await guideStore.markDetail(kind, id, { outcome: out, hash }, currentPolicy, tx);
-                if (key) await guideStore.setEntityKey(kind, id, key, tx);
+                if (key) await guideStore.setEntityKey(kind, id, entityKey, tx);
                 if (out === 'ok' && key) await tx.query('DELETE FROM catalog_manual_entries WHERE entity_kind = ? AND entity_id = ?', [kind, id]);
                 touched.push([kind, entityKey]);
                 summary.details++;
             }
             for (const [k, id, key] of register) {
                 await guideStore.registerIds(k, [id], tx);
-                if (key) await guideStore.setEntityKey(k, id, key, tx);
+                if (key) await guideStore.setEntityKey(k, id, await store.resolveEntityKey(k, key), tx);
                 touched.push([k, key ?? String(id)]);
             }
             await store.refreshCompleteness(touched, tx);
@@ -360,10 +369,11 @@ export function createGuideRelay({ db, store, guideStore, policy = null, getPoli
      * applied run; here a matching applied run is reused, and one whose projection failed (nothing
      * applied) is replaced by a new run.
      */
-    async function stage(lease, observations, prior, resultsHash) {
+    async function stage(lease, observations, prior, resultsHash, fieldUpdates) {
         if (prior && prior.status !== 'failed') return prior.id;
         if (!observations.length) return null;
         const link = async (tx, runId) => {
+            for (const update of fieldUpdates) await tx.query('INSERT INTO catalog_guide_field_updates (run_id, entity_kind, entity_key, source_key, alias_from, payload) VALUES (?, ?, ?, ?, ?, ?) AS new ON DUPLICATE KEY UPDATE source_key = new.source_key, alias_from = new.alias_from, payload = new.payload', [runId, update.kind, update.key, update.sourceKey, update.aliasFrom, canonicalJson(update.record)]);
             const { affectedRows } = await tx.query(
                 `UPDATE catalog_guide_leases SET run_id = ?, results_hash = ? WHERE id = ? AND ${prior ? 'run_id = ?' : 'run_id IS NULL'}`,
                 prior ? [runId, resultsHash, lease.id, prior.id] : [runId, resultsHash, lease.id]);

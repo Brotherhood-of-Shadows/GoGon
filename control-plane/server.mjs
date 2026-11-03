@@ -240,6 +240,10 @@ export function createControlPlane({ config, store, engine, switcher, rebind = a
         try {
             if (p === '/api/catalog/manual-fields') { queryOnly(url, []); return send(res, 200, { kinds: svc.manualFields() }); }
             if (p === '/api/catalog/summary') { queryOnly(url, []); return send(res, 200, await svc.summary()); }
+            if ((match = p.match(/^\/api\/catalog\/entities\/([a-z_]{1,16})\/([^/]{1,600})\/edit$/))) {
+                queryOnly(url, []);
+                return send(res, 200, await svc.getEditingRecord(match[1], decodeURIComponent(match[2])));
+            }
             if (p === '/api/catalog/entities') {
                 queryOnly(url, ['kind', 'q', 'completeness', 'page', 'pageSize']);
                 return send(res, 200, await svc.listEntities({
@@ -267,9 +271,22 @@ export function createControlPlane({ config, store, engine, switcher, rebind = a
         let match;
         const audit = (action, subject, outcome = 'success', detail = null) => store.audit({ actor, action, subject: String(subject).slice(0, 100), outcome, detail });
         try {
+            if ((match = p.match(/^\/api\/catalog\/entities\/([a-z_]{1,16})\/([^/]{1,600})\/edit$/))) {
+                const body = await readJson(req);
+                allowOnly(body, ['record', 'version', 'fieldStates']);
+                try {
+                    const result = await svc.editEntity(match[1], decodeURIComponent(match[2]), body);
+                    await audit('catalog.entity.edit', match[1], 'success', { runId: result.runId });
+                    broadcastSoon();
+                    return send(res, 200, { ok: true, ...result });
+                } catch (e) {
+                    if (e instanceof CatalogError) await audit('catalog.entity.edit', match[1], 'denied', { reason: e.code });
+                    throw e;
+                }
+            }
             if (p === '/api/catalog/manual-entries') {
                 const body = await readJson(req);
-                allowOnly(body, ['kind', 'record']);
+                allowOnly(body, ['kind', 'record', 'fieldStates']);
                 try {
                     const result = await svc.addManualEntry(body);
                     await audit('catalog.manual.create', body.kind, 'success', { runId: result.runId });

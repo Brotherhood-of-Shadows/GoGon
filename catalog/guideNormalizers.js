@@ -15,7 +15,7 @@ const S = {
     int: v => Number.isSafeInteger(v) && Math.abs(v) <= 1e12,
     num: (lo, hi) => v => typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi,
     str: max => v => typeof v === 'string' && v.length >= 1 && v.length <= max && !CONTROL.test(v),
-    opt: f => v => v === null || v === undefined || f(v),
+    opt: f => Object.assign(v => v === null || v === undefined || f(v), f.shape ? { shape: f.shape } : {}),
     arr: (f, max) => v => Array.isArray(v) && v.length <= max && v.every(f),
     obj: (shape, required = []) => Object.assign(v => isPlain(v) && Object.keys(v).every(k => Object.hasOwn(shape, k))
         && required.every(k => v[k] !== undefined) && Object.entries(v).every(([k, x]) => shape[k](x)), { shape }),
@@ -71,15 +71,67 @@ export const indexEntry = S.obj({ id: S.id, name: S.opt(S.str(191)) }, ['id']);
  * @returns {boolean} Whether the manual record is valid.
  */
 export function validManualRecord(kind, record) {
-    return Boolean(RECORD_SCHEMAS[kind] && S.obj(RECORD_SCHEMAS[kind].shape, ['id'])(record)
+    return Boolean(RECORD_SCHEMAS[kind] && S.obj(manualShape(kind), ['id'])(record)
+        && (!['relic', 'quest'].includes(kind) || record.name == null || record.name.trim() === record.name)
         && (record.minLevel == null || record.minLevel >= -2147483648 && record.minLevel <= 2147483647));
+}
+
+const manualShape = kind => ({ ...RECORD_SCHEMAS[kind]?.shape,
+    ...(kind === 'realm' ? { masterRealmId: S.opt(S.id), mapObjects: () => true } : {}),
+    ...(kind === 'relic' || kind === 'quest' ? { details: () => true } : {}),
+});
+
+/** Validates a patch without requiring unchanged fields or allowing identity-ID changes.
+ * @param {string} kind Catalog kind.
+ * @param {object} record Partial fields.
+ * @returns {boolean} Whether the patch is well formed.
+ */
+export function validEditRecord(kind, record) {
+    if (!RECORD_SCHEMAS[kind] || !isPlain(record)) return false;
+    const shape = manualShape(kind);
+    for (const [field, value] of Object.entries(record)) {
+        if (!Object.hasOwn(shape, field)) return false;
+        if (field === 'id') { if (!Number.isSafeInteger(value) || value <= 0) return false; continue; }
+        if (value === null) {
+            continue;
+        }
+        if (field === 'sections' && Array.isArray(value) && value.length === 0) continue;
+        if (field === 'minLevel' && (!S.int(value) || value < -2147483648 || value > 2147483647)) return false;
+        if (kind === 'realm' && field === 'quests') {
+            if (!S.arr(S.obj({ questId: S.id, questName: S.str(191) }, ['questName']), 200)(value)) return false;
+        } else if (kind === 'realm' && field === 'relics') {
+            if (!S.arr(v => S.str(191)(v) || S.obj({ relicId: S.id, relicName: S.str(191) }, ['relicName'])(v), 200)(value)) return false;
+        } else if (field === 'droppedBy') {
+            if (!S.arr(S.obj({ creatureName: S.str(191), dropRate: S.num(0, 100) }, ['creatureName']), 200)(value)) return false;
+        } else if (!shape[field](value)) return false;
+    }
+    return true;
 }
 
 /** Field names accepted by the manual form, kept in sync with Guide validation.
  * @returns {object} Fields grouped by Guide entity kind.
  */
 export function manualRecordFields() {
-    return Object.fromEntries(Object.entries(RECORD_SCHEMAS).map(([kind, schema]) => [kind, Object.keys(schema.shape)]));
+    return Object.fromEntries(Object.keys(RECORD_SCHEMAS).map(kind => [kind, Object.keys(manualShape(kind))]));
+}
+
+/** Lists valid field-state paths, including individual stats and range endpoints.
+ * @param {string} kind Guide kind.
+ * @returns {string[]} Valid owner policy paths.
+ */
+export function manualPolicyFields(kind) {
+    if (!RECORD_SCHEMAS[kind]) return [];
+    const paths = [];
+    const walk = (shape, prefix = '') => {
+        for (const [field, validator] of Object.entries(shape)) {
+            if (field === 'id' && !prefix) continue;
+            const path = prefix ? `${prefix}.${field}` : field;
+            paths.push(path);
+            if (validator.shape) walk(validator.shape, path);
+        }
+    };
+    walk(manualShape(kind));
+    return paths;
 }
 
 const compact = o => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== null && v !== undefined));
@@ -127,15 +179,17 @@ export function mapGuideRecord(kind, record) {
     } else if (kind === 'realm') {
         observations.push({ kind: 'realm', payload: compact({
             id: record.id, name: record.name, min_level: record.minLevel, shops: record.shops, connections: record.stairways,
+            master_realm_id: record.masterRealmId, map_objects: record.mapObjects,
         }) });
+        if (record.masterRealmId) references.push({ kind: 'master_realm', id: record.masterRealmId });
         for (const relic of record.relics ?? []) {
             const name = typeof relic === 'string' ? relic : relic.relicName;
             observations.push({ kind: 'relic', payload: { realm_id: record.id, name } });
-            if (typeof relic !== 'string') references.push({ kind: 'relic', id: relic.relicId, name, entityKey: `${record.id}:${name}`, realmId: record.id });
+            if (typeof relic !== 'string' && relic.relicId) references.push({ kind: 'relic', id: relic.relicId, name, entityKey: `${record.id}:${name}`, realmId: record.id });
         }
         for (const q of record.quests ?? []) {
             observations.push({ kind: 'quest', payload: { realm_id: record.id, name: q.questName } });
-            references.push({ kind: 'quest', id: q.questId, name: q.questName, entityKey: `${record.id}:${q.questName}`, realmId: record.id });
+            if (q.questId) references.push({ kind: 'quest', id: q.questId, name: q.questName, entityKey: `${record.id}:${q.questName}`, realmId: record.id });
         }
         for (const c of record.creatures ?? []) {
             references.push({ kind: 'creature', id: c.creatureId, name: c.creatureName ?? null });
@@ -145,6 +199,7 @@ export function mapGuideRecord(kind, record) {
     } else if (kind === 'master_realm') {
         observations.push({ kind: 'master_realm', payload: compact({
             id: record.id, name: record.name, connected_realms: record.realms,
+            min_level: record.minLevel, imageUrl: record.imageUrl,
         }) });
         for (const r of record.realms ?? []) {
             observations.push({ kind: 'realm', payload: { id: r.realmId, master_realm_id: record.id } });

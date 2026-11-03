@@ -58,10 +58,18 @@ button.danger { color: var(--bad); border-color: var(--bad); }
 button[hidden] { display: none; }
 
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin-top: 12px; }
-.manual-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin: 16px 0; }
+.manual-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 14px; margin: 16px 0; }
 .manual-fields label { display: block; margin-bottom: 4px; }
 .manual-fields input, .manual-fields textarea { width: 100%; }
 .manual-fields textarea { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; resize: vertical; }
+.manual-group { min-width: 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin: 0; grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 12px; }
+.manual-group legend { font-weight: 600; padding: 0 6px; }
+.manual-rows { display: grid; gap: 10px; grid-column: 1 / -1; }
+.manual-row { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; padding: 8px; background: var(--bg); border-radius: 6px; }
+.manual-row .manual-field { flex: 1 1 150px; }
+.manual-row .manual-group { flex: 1 1 100%; }
+.manual-state { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.manual-state select { display: block; width: 100%; }
 .form-grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; max-width: 560px; }
 .form-grid h3, .form-grid button, .form-grid .field-error { grid-column: 1 / -1; margin: 0; }
 .form-grid button { justify-self: start; }

@@ -299,16 +299,179 @@ async function loadOutbox() {
 // markup. Destructive actions show the server's plan and need its exact confirmation phrase.
 const catalogView = { kind: 'item', q: '', completeness: '', page: 1, pageSize: 25, total: 0, runsPage: 1, summary: null };
 let manualFields = null;
-const MANUAL_NUMBERS = new Set(['id', 'setId', 'minLevel', 'realmId']);
-const MANUAL_JSON = new Set(['stats', 'enhancements', 'droppedBy', 'setBonuses', 'droppedItems', 'realms', 'shops', 'relics', 'quests', 'creatures', 'stairways', 'sections']);
-const MANUAL_EXAMPLES = {
-    stats: '{"level": 10, "attack": 20}', enhancements: '[]', droppedBy: '[{"creatureName":"Golem","dropRate":1}]',
-    setBonuses: '{"attack": 10}', droppedItems: '[{"itemId":123,"itemName":"Sword"}]',
-    realms: '[{"realmId":123,"realmName":"Forest"}]', shops: '[{"shopId":123,"shopName":"Supplies"}]',
-    relics: '[{"relicId":123,"relicName":"Stone"}]', quests: '[{"questId":123,"questName":"Find the stone"}]',
-    creatures: '[{"creatureId":123,"creatureName":"Golem"}]', stairways: '[{"targetRealmId":123,"targetRealmName":"Forest"}]',
-    sections: '[{"heading":"Rewards","text":"100 XP"}]',
-};
+let manualEdit = null;
+let manualReaders = new Map();
+let manualStateReaders = new Map();
+let manualControlId = 0;
+const manualLabel = name => name === 'id' ? 'ID' : name.replace(/([A-Z])/g, ' $1').replace(/\bId\b/g, 'ID').replace(/^./, c => c.toUpperCase());
+const textField = (max = 191) => ({ type: 'text', max });
+const numberField = (min = -1e12, max = 1e12, step = 1) => ({ type: 'number', min, max, step });
+const idField = () => numberField(1, 10000000);
+const objectFields = fields => ({ type: 'object', fields });
+const listFields = (fields, required = [], max = 200) => ({ type: 'list', fields, required, max });
+const ITEM_STAT_FIELDS = Object.fromEntries(['level', 'attack', 'defense', 'armor', 'damage', 'hp', 'xpGain', 'stamina', 'staminaGain', 'goldGain'].map(name => [name, numberField()]));
+ITEM_STAT_FIELDS.type = textField(64);
+const ENHANCEMENT_FIELDS = { name: textField(), value: numberField(0, 100000, 'any') };
+const enhancementRows = () => listFields(ENHANCEMENT_FIELDS, ['name', 'value'], 64);
+
+function manualDefinition(kind, name) {
+    if (name === 'stats') return objectFields(kind === 'creature'
+        ? { class: textField(64), level: numberField(), ...Object.fromEntries(['attack', 'defense', 'armor', 'damage', 'hp', 'gold', 'xp'].map(key => [key, { ...objectFields({ min: numberField(), max: numberField() }), required: ['min', 'max'] }])) }
+        : ITEM_STAT_FIELDS);
+    if (name === 'setBonuses') return objectFields({ ...ITEM_STAT_FIELDS, enhancements: enhancementRows() });
+    if (name === 'enhancements') return kind === 'creature' ? listFields({ value: textField(256) }, ['value'], 64) : enhancementRows();
+    if (name === 'realms') return listFields({ realmId: idField(), realmName: textField(), ...(kind === 'master_realm' ? { minLevel: numberField(0, 2147483647) } : {}) }, ['realmId']);
+    if (name === 'droppedItems') return listFields({ itemId: idField(), itemName: textField() }, ['itemId']);
+    if (name === 'droppedBy') return listFields({ creatureName: textField(), dropRate: numberField(0, 100, 'any') }, manualEdit ? ['creatureName'] : ['creatureName', 'dropRate']);
+    if (name === 'mapObjects' || name === 'details') return { type: 'tree' };
+    if (name === 'shops') return listFields({ shopId: idField(), shopName: textField() }, ['shopId']);
+    if (name === 'relics') return listFields({ relicId: idField(), relicName: textField() }, ['relicName']);
+    if (name === 'quests') return listFields({ questId: idField(), questName: textField() }, manualEdit ? ['questName'] : ['questId', 'questName']);
+    if (name === 'creatures') return listFields({ creatureId: idField(), creatureName: textField() }, ['creatureId']);
+    if (name === 'stairways') return listFields({ targetRealmId: idField(), targetRealmName: textField() }, ['targetRealmId']);
+    if (name === 'sections') return listFields({ heading: textField(), text: { type: 'textarea', max: 8192 } }, ['heading', 'text'], 64);
+    if (name === 'description') return { type: 'textarea', max: 8192 };
+    if (['id', 'setId', 'realmId', 'masterRealmId'].includes(name)) return idField();
+    if (name === 'minLevel') return numberField(0, 2147483647);
+    return textField(name === 'imageUrl' ? 512 : name === 'rarity' ? 64 : 191);
+}
+
+function attachManualState(node, path, group = false) {
+    if (path === 'id' || path.split('.').some(part => /^\d+$/.test(part))) return;
+    let inherited = path;
+    while (inherited && !manualEdit?.fieldStates?.[inherited]) inherited = inherited.split('.').slice(0, -1).join('.');
+    const initial = manualEdit?.fieldStates?.[inherited] ?? manualEdit?.defaultFieldState ?? 'incomplete';
+    const id = `mf-state-${++manualControlId}`;
+    const select = el('select', { id, dataset: { policy: path } }, ...[
+        ['incomplete', 'Incomplete'], ['do_not_check', 'Do not check'], ['complete', 'Complete'],
+    ].map(([value, label]) => el('option', { value, selected: value === initial }, label)));
+    node.append(el('label', { class: 'manual-state', htmlFor: id }, 'Guide updates ', select));
+    manualStateReaders.set(path, { initial, group, read: () => select.value });
+}
+
+// Each control reads typed values directly; optional empty rows never create invented data.
+function manualControl(def, value, path, label = manualLabel(path.split('.').at(-1))) {
+    const id = `mf-${path.replaceAll('.', '-')}-${++manualControlId}`;
+    if (def.type === 'tree') { const control = manualTreeControl(value, path, label); attachManualState(control.node, path); return control; }
+    if (def.type === 'object') {
+        const readers = Object.entries(def.fields).map(([key, child]) => [key, manualControl(child, value?.[key], `${path}.${key}`)]);
+        const node = el('fieldset', { class: 'manual-group', dataset: { field: path } }, el('legend', {}, label), ...readers.map(([, child]) => child.node));
+        attachManualState(node, path, true);
+        return { node, read: () => {
+            const result = { ...(value ?? {}) };
+            for (const [key, child] of readers) {
+                const next = child.read();
+                if (next === undefined) delete result[key]; else result[key] = next;
+            }
+            if (Object.keys(result).length && def.required?.some(key => result[key] === undefined)) throw new Error(`${label}: enter both minimum and maximum.`);
+            if (def.required && result.min > result.max) throw new Error(`${label}: minimum cannot exceed maximum.`);
+            return Object.keys(result).length || value && !Object.keys(value).length ? result : undefined;
+        } };
+    }
+    if (def.type === 'list') {
+        const rows = el('div', { class: 'manual-rows' });
+        const entries = [];
+        const add = el('button', { type: 'button', class: 'ghost', dataset: { add: path } }, `Add ${label.toLowerCase()} row`);
+        const append = (initial = {}) => {
+            if (entries.length >= def.max) return;
+            const index = ++manualControlId;
+            const readers = Object.entries(def.fields).map(([key, child]) => [key, manualControl(child, initial[key], `${path}.${index}.${key}`)]);
+            const remove = el('button', { type: 'button', class: 'ghost danger', title: `Remove ${label.toLowerCase()} row` }, 'Remove');
+            const row = el('div', { class: 'manual-row' }, ...readers.map(([, child]) => child.node), remove);
+            const entry = { row, readers };
+            entries.push(entry);
+            remove.addEventListener('click', () => { entries.splice(entries.indexOf(entry), 1); row.remove(); add.disabled = false; });
+            rows.append(row);
+            add.disabled = entries.length >= def.max;
+        };
+        for (const entry of value ?? []) append(typeof entry === 'string'
+            ? { [Object.hasOwn(def.fields, 'relicName') ? 'relicName' : 'value']: entry } : entry);
+        if (!entries.length) append();
+        add.addEventListener('click', () => append());
+        const node = el('fieldset', { class: 'manual-group', dataset: { field: path } }, el('legend', {}, label), rows, add);
+        attachManualState(node, path);
+        return { node, read: () => {
+            const result = [];
+            for (const entry of entries) {
+                const values = Object.fromEntries(entry.readers.map(([key, child]) => [key, child.read()]).filter(([, next]) => next !== undefined));
+                if (!Object.keys(values).length) continue;
+                for (const key of def.required) if (values[key] === undefined) throw new Error(`${label}: enter ${manualLabel(key).toLowerCase()} for each filled row.`);
+                if (path === 'enhancements' && Object.hasOwn(values, 'value') && !Object.hasOwn(def.fields, 'name')) result.push(values.value);
+                else if (path === 'relics' && values.relicId === undefined) result.push(values.relicName);
+                else result.push(values);
+            }
+            return result.length || Array.isArray(value) ? result : undefined;
+        } };
+    }
+    const input = el(def.type === 'textarea' ? 'textarea' : 'input', {
+        id, name: path, value: value ?? '', dataset: { field: path },
+        ...(def.type === 'textarea' ? { rows: 3, maxLength: def.max }
+            : def.type === 'number' ? { type: 'number', min: def.min, max: def.max, step: def.step }
+                : { type: 'text', maxLength: def.max }),
+    });
+    if (!path.includes('.')) input.id = `mf-${path}`;
+    input.required = path === 'id' && !manualEdit;
+    input.readOnly = path === 'id' && Boolean(manualEdit);
+    const node = el('div', { class: 'manual-field' }, el('label', { htmlFor: input.id }, label + (input.required ? ' *' : '')), input);
+    if (!def.noState) attachManualState(node, path);
+    return { node, read: () => {
+        const raw = input.value.trim();
+        if (!raw) return value === '' ? '' : undefined;
+        if (def.type !== 'number') return raw;
+        const number = Number(raw);
+        if (!Number.isFinite(number) || number < def.min || number > def.max || def.step === 1 && !Number.isInteger(number)) throw new Error(`${label} must be a valid number between ${def.min} and ${def.max}.`);
+        return number;
+    } };
+}
+
+function manualTreeControl(value, path, label) {
+    const initialType = value === null ? 'null' : Array.isArray(value) ? 'list' : typeof value === 'object' || value === undefined ? 'object' : typeof value === 'number' ? 'number' : typeof value === 'boolean' ? 'boolean' : 'text';
+    const typeId = `mf-tree-type-${++manualControlId}`;
+    const type = el('select', { id: typeId }, ...['object', 'list', 'text', 'number', 'boolean', 'null'].map(name => el('option', { value: name, selected: name === initialType }, name)));
+    const body = el('div', { class: 'manual-rows' });
+    let read;
+    const render = initial => {
+        const selected = type.value;
+        const entries = [];
+        const append = (key = '', data) => {
+            const child = manualTreeControl(data === undefined ? '' : data, `${path}.${++manualControlId}`, selected === 'list' ? 'Value' : 'Field value');
+            const name = el('input', { type: 'text', value: key, placeholder: 'Field name', maxLength: 191, ariaLabel: 'Field name' });
+            const remove = el('button', { type: 'button', class: 'ghost danger' }, 'Remove');
+            const row = el('div', { class: 'manual-row' }, ...(selected === 'object' ? [name] : []), child.node, remove);
+            const entry = { name, child };
+            entries.push(entry);
+            remove.addEventListener('click', () => { entries.splice(entries.indexOf(entry), 1); row.remove(); });
+            body.append(row);
+        };
+        body.replaceChildren();
+        if (selected === 'object' || selected === 'list') {
+            const add = el('button', { type: 'button', class: 'ghost' }, selected === 'list' ? 'Add value' : 'Add field');
+            add.addEventListener('click', () => { if (entries.length < 200) append(); });
+            for (const [key, data] of Object.entries(initial ?? {})) append(key, data);
+            body.append(add);
+            read = () => {
+                const pairs = entries.map(entry => [entry.name.value.trim(), entry.child.read()]).filter(([, data]) => data !== undefined);
+                if (!pairs.length && value === undefined) return undefined;
+                if (selected === 'list') return pairs.map(([, data]) => data);
+                if (pairs.some(([key]) => !key)) throw new Error(`${label}: enter a name for each field.`);
+                if (new Set(pairs.map(([key]) => key)).size !== pairs.length) throw new Error(`${label}: field names must be unique.`);
+                return Object.fromEntries(pairs);
+            };
+        } else if (selected === 'null') read = () => null;
+        else if (selected === 'boolean') {
+            const input = el('input', { type: 'checkbox', checked: initial === true });
+            body.append(el('label', {}, input, ' Yes'));
+            read = () => input.checked;
+        } else {
+            const control = manualControl({ ...(selected === 'number' ? numberField(-1e12, 1e12, 'any') : textField(8192)), noState: true }, typeof initial === 'object' ? '' : initial, `${path}.value`, 'Value');
+            body.append(control.node);
+            read = control.read;
+        }
+    };
+    type.addEventListener('change', () => render(undefined));
+    render(value);
+    return { node: el('fieldset', { class: 'manual-group' }, el('legend', {}, label), el('label', { htmlFor: typeId }, 'Value type'), type, body), read: () => read() };
+}
 
 async function loadManualForm() {
     try {
@@ -320,21 +483,33 @@ async function loadManualForm() {
 function renderManualFields() {
     const kind = document.getElementById('mf-kind').value;
     if (!manualFields?.[kind]) return;
+    manualReaders = new Map();
+    manualStateReaders = new Map();
     document.getElementById('manual-entry-fields').replaceChildren(...manualFields[kind].map(name => {
-        const json = MANUAL_JSON.has(name);
-        const multiline = json || name === 'description';
-        const label = name.replace(/([A-Z])/g, ' $1').replace(/^./, c => c.toUpperCase());
-        const input = el(multiline ? 'textarea' : 'input', {
-            id: `mf-${name}`, name, required: name === 'id',
-            ...(json ? { rows: 3, placeholder: name === 'stats' && kind === 'creature' ? '{"level":10,"attack":{"min":10,"max":20}}' : MANUAL_EXAMPLES[name] }
-                : MANUAL_NUMBERS.has(name) ? { type: 'number', min: name === 'minLevel' ? 0 : 1, max: name === 'minLevel' ? 2147483647 : 10000000, step: 1 }
-                    : { ...(!multiline ? { type: 'text' } : {}), maxLength: name === 'description' ? 8192 : name === 'imageUrl' ? 512 : 191 }),
-        });
-        return el('div', {}, el('label', { htmlFor: input.id }, `${label}${json ? ' (JSON)' : ''}${name === 'id' ? ' *' : ''}`), input);
+        const control = manualControl(manualDefinition(kind, name), manualEdit?.record[name], name);
+        control.node.dataset.field = name;
+        manualReaders.set(name, control.read);
+        return control.node;
     }));
+    document.getElementById('manual-entry-save').textContent = manualEdit ? 'Save changes' : 'Add incomplete entry';
+    document.getElementById('manual-entry-cancel').hidden = !manualEdit;
+    document.getElementById('manual-entry-open').hidden = Boolean(manualEdit);
+    document.getElementById('mf-kind').disabled = Boolean(manualEdit);
+    document.getElementById('manual-entry-title').textContent = manualEdit ? `Edit ${kind.replace('_', ' ')}` : 'Add a catalog entry';
     document.querySelector('#manual-entry-form .field-error').hidden = true;
 }
+
+async function editCatalogEntity(kind, key) {
+    try {
+        const entry = await api('GET', `/api/catalog/entities/${encodeURIComponent(kind)}/${encodeURIComponent(key)}/edit`);
+        manualEdit = { kind, key, ...entry };
+        [...document.querySelectorAll('#mf-kind option')].find(option => option.value === kind).selected = true;
+        await openCatalogTab('manual');
+        document.getElementById('mf-name')?.focus();
+    } catch (e) { showBanner(fieldMessage(e)); }
+}
 const REASON_LABELS = {
+    manual_field_incomplete: 'some fields are awaiting Guide updates',
     guide_detail_missing: 'guide detail not read yet',
     guide_detail_failed: 'guide detail failed validation',
     required_field_missing: 'a required field is missing',
@@ -449,6 +624,7 @@ async function showEntity(kind, key) {
             el('td', {}, fmtTime(p.observedAt)), el('td', {}, p.source), el('td', {}, `${p.mode} (${p.runStatus})`), el('td', {}, p.hash)))));
     box.replaceChildren(
         el('h3', {}, `${kind} ${d.key}`),
+        el('button', { type: 'button', onclick: () => editCatalogEntity(kind, d.key) }, 'Edit entry'),
         el('div', {}, el('strong', {}, 'Coverage: '), coverageCell(d.catalog)),
         d.catalog ? el('div', { class: 'muted' }, `First seen ${fmtTime(d.catalog.firstSeenAt)}; last seen ${fmtTime(d.catalog.lastSeenAt)}; verified ${fmtTime(d.catalog.verifiedAt)}`) : null,
         d.guide ? el('div', { class: 'muted' }, `Guide detail: ${d.guide.status}; checked ${fmtTime(d.guide.checkedAt)}; next check ${fmtTime(d.guide.nextCheckAt)}`) : null,
@@ -639,7 +815,13 @@ document.querySelectorAll('.subtabs button').forEach(button => button.addEventLi
 
 const fieldValue = id => document.getElementById(id).value;
 
-document.getElementById('mf-kind').addEventListener('change', renderManualFields);
+document.getElementById('mf-kind').addEventListener('change', () => { manualEdit = null; renderManualFields(); });
+document.getElementById('manual-entry-cancel').addEventListener('click', () => { manualEdit = null; renderManualFields(); });
+document.getElementById('manual-entry-open').addEventListener('click', async () => {
+    const id = fieldValue('mf-id').trim();
+    if (!/^[1-9]\d{0,17}$/.test(id)) { showBanner('Enter the existing entry ID first.'); return; }
+    await editCatalogEntity(fieldValue('mf-kind'), id);
+});
 document.getElementById('manual-entry-form').addEventListener('submit', async event => {
     event.preventDefault();
     const error = event.currentTarget.querySelector('.field-error');
@@ -649,16 +831,34 @@ document.getElementById('manual-entry-form').addEventListener('submit', async ev
     try {
         const kind = fieldValue('mf-kind');
         const record = {};
-        for (const name of manualFields[kind]) {
-            const value = fieldValue(`mf-${name}`).trim();
-            if (!value) continue;
-            if (MANUAL_JSON.has(name)) {
-                try { record[name] = JSON.parse(value); } catch { throw new Error(`${name} must be valid JSON.`); }
-            } else record[name] = MANUAL_NUMBERS.has(name) ? Number(value) : value;
+        for (const [name, read] of manualReaders) {
+            if (manualEdit && name === 'id') continue;
+            const value = read();
+            if (manualEdit) {
+                const previous = manualEdit.record[name];
+                const next = value === undefined && Array.isArray(previous) ? [] : value;
+                if (name !== 'id' && JSON.stringify(next) !== JSON.stringify(previous)) record[name] = next === undefined ? null : next;
+            } else if (value !== undefined) record[name] = value;
         }
-        await api('POST', '/api/catalog/manual-entries', { kind, record });
+        const editing = manualEdit;
+        const fieldStates = {};
+        const atPath = (value, path) => path.split('.').reduce((current, part) => current && typeof current === 'object' && Object.hasOwn(current, part) ? current[part] : undefined, value);
+        for (const [path, control] of manualStateReaders) {
+            const state = control.read();
+            const submitted = Object.hasOwn(record, path.split('.')[0]);
+            const changed = editing && submitted && JSON.stringify(atPath(record, path)) !== JSON.stringify(atPath(editing.record, path));
+            const ancestorChanged = [...manualStateReaders].some(([parent, ancestor]) => path.startsWith(`${parent}.`) && ancestor.read() !== ancestor.initial);
+            if (state !== control.initial || changed && !ancestorChanged && (!control.group || editing.fieldStates?.[path])) fieldStates[path] = state;
+        }
+        const labels = Object.keys(fieldStates).length ? { fieldStates } : {};
+        if (editing) {
+            const result = await api('POST', `/api/catalog/entities/${encodeURIComponent(kind)}/${encodeURIComponent(editing.key)}/edit`, { record, version: editing.version, ...labels });
+            manualEdit = null;
+            await showEntity(kind, result.key);
+        } else await api('POST', '/api/catalog/manual-entries', { kind, record, ...labels });
         renderManualFields();
-        showBanner(`${kind.replace('_', ' ')} #${record.id} added as incomplete. Guide checks will complete its information when available.`, 'ok');
+        document.getElementById('mf-id')?.focus();
+        showBanner(editing ? 'Changes saved.' : `${kind.replace('_', ' ')} #${record.id} added as incomplete. Ready for the next entry.`, 'ok');
         await loadCatalogSummary();
     } catch (e) { error.textContent = fieldMessage(e); error.hidden = false; }
     finally { save.disabled = false; }

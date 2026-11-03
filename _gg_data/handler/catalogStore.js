@@ -18,13 +18,14 @@ import { clearAllCaches } from './cacheLayer.js';
 import { canonicalImageUrl } from './mediaUrl.js';
 import { idsFrom, parseJsonColumn } from './servingRelations.js';
 import { GUIDE_POLICY } from '../../catalog/contracts/policy.js';
+import { fieldValueAt, setFieldValue, changedFieldPaths } from '../../catalog/fieldStates.js';
 
 export const ENTITY_KINDS = Object.freeze(['item', 'creature', 'realm', 'master_realm', 'relic', 'quest', 'relation']);
 export const SOURCES = Object.freeze(['game_session', 'guide_baseline', 'manual_import']);
 export const RUN_MODES = Object.freeze(['observe_realm', 'item_frontier', 'guide_discovery', 'seed', 'promote', 'revert']);
 export const JOB_KINDS = Object.freeze(['observe_realm', 'item_frontier', 'guide_discovery']);
 // AC-CAT-013: bounded, code-owned reasons (joined with ',' in catalog_entities.incomplete_reason).
-export const INCOMPLETE_REASONS = Object.freeze(['guide_detail_missing', 'guide_detail_failed', 'required_field_missing', 'known_drop_unresolved']);
+export const INCOMPLETE_REASONS = Object.freeze(['guide_detail_missing', 'guide_detail_failed', 'required_field_missing', 'known_drop_unresolved', 'manual_field_incomplete']);
 const COMPLETENESS_KINDS = ['item', 'creature', 'realm', 'master_realm', 'relic', 'quest'];
 const DEPENDENT_RECHECK_LIMIT = 500;
 export const RELATION_TYPES = Object.freeze(['realm_creature', 'creature_drop']);
@@ -65,7 +66,7 @@ export function canonicalJson(value) {
         }
         if (Array.isArray(v)) return v.map(x => walk(x, depth + 1));
         if (typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
-            const out = {};
+            const out = Object.create(null);
             for (const k of Object.keys(v).sort()) {
                 if (v[k] === undefined) continue;
                 out[k] = walk(v[k], depth + 1);
@@ -96,7 +97,7 @@ const field = {
 // table/columns are the serving projection. json: columns stored as JSON text. Realm creature/relic/
 // quest lists are projected through relations, not realm payloads.
 const SCHEMAS = {
-    master_realm: { table: 'master_realms', columns: { id: field.id, name: field.text(256), connected_realms: field.json }, json: ['connected_realms'] },
+    master_realm: { table: 'master_realms', columns: { id: field.id, name: field.text(256), min_level: field.intOrNull, imageUrl: field.text(512), connected_realms: field.json }, json: ['connected_realms'] },
     realm: {
         table: 'realms',
         columns: { id: field.id, name: field.text(256), min_level: field.intOrNull, master_realm_id: field.idOrNull, shops: field.json, connections: field.json, map_objects: field.json },
@@ -117,6 +118,14 @@ const SCHEMAS = {
 };
 const RELATION_FIELDS = { realm_creature: ['realm_id', 'creature_id'], creature_drop: ['creature_id', 'item_id'] };
 const PROJECTION_ORDER = ['master_realm', 'realm', 'creature', 'item', 'relic', 'quest', 'relation'];
+const EDIT_COLUMNS = {
+    item: { name: 'name', rarity: 'rarity', imageUrl: 'imageUrl', stats: 'stats', enhancements: 'enhancements', droppedBy: 'droppedBy', setBonuses: 'setBonuses', setId: 'setId', setName: 'setName' },
+    creature: { name: 'name', imageUrl: 'imageUrl', description: 'description', stats: 'stats', enhancements: 'enhancements', droppedItems: 'droppedItems' },
+    realm: { name: 'name', minLevel: 'min_level', masterRealmId: 'master_realm_id', shops: 'shops', stairways: 'connections', mapObjects: 'map_objects' },
+    master_realm: { name: 'name', minLevel: 'min_level', imageUrl: 'imageUrl', realms: 'connected_realms' },
+    relic: { name: 'name', realmId: 'realm_id', details: 'details' },
+    quest: { name: 'name', realmId: 'realm_id', minLevel: 'min_level', details: 'details' },
+};
 
 function entityKey(kind, p) {
     if (kind === 'relation') return `${p.type}:${p[RELATION_FIELDS[p.type][0]]}:${p[RELATION_FIELDS[p.type][1]]}`;
@@ -142,6 +151,8 @@ export function normalizeObservation(kind, payload) {
         required = SCHEMAS[kind].natural ? ['realm_id', 'name'] : ['id'];
     }
     for (const [k, v] of Object.entries(payload)) {
+        if (kind !== 'relation' && SCHEMAS[kind].natural && k === '$deleted' && typeof v === 'boolean') continue;
+        if (kind === 'relation' && k === 'present' && typeof v === 'boolean') continue;
         if (!Object.hasOwn(allowed, k)) throw invalid(`Field "${k.slice(0, 40)}" is not allowed for ${kind}.`, k.slice(0, 40));
         if (v !== undefined && !allowed[k](v)) throw invalid(`Field "${k}" has an invalid value.`, k);
     }
@@ -263,9 +274,11 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
      * (incremental projection); otherwise every column is set, missing ones to NULL (restore).
      */
     async function applyEntity(tx, kind, payload, { merge }) {
+        if (payload.$deleted) { await removeEntity(tx, kind, payload, { dryRun: false }); return; }
         if (kind === 'relation') {
             const [a, b] = RELATION_FIELDS[payload.type];
             const table = payload.type === 'realm_creature' ? 'realm_creatures' : 'creature_drops';
+            if (payload.present === false) { await removeEntity(tx, kind, payload, { dryRun: false }); return; }
             const [row] = await tx.query(`SELECT 1 AS present FROM ${table} WHERE ${a} = ? AND ${b} = ?`, [payload[a], payload[b]]);
             if (!row) {
                 await tx.query(`INSERT INTO ${table} (${a}, ${b}) VALUES (?, ?)`, [payload[a], payload[b]]);
@@ -365,7 +378,7 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
         for (const { payload, source } of entries) {
             const { $baseline, ...fields } = payload;
             // Owner-entered drafts are provisional: a later Guide read can replace their fields.
-            const r = source === 'manual_entry' ? -1 : SOURCE_RANK[source];
+            const r = source === 'manual_edit' ? 0 : source === 'manual_entry' ? -1 : SOURCE_RANK[source];
             for (const [c, v] of Object.entries(fields)) {
                 if (rank[c] !== undefined && r < rank[c]) continue;
                 merged[c] = v;
@@ -391,7 +404,8 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
          WHERE o.entity_kind = ? AND o.entity_key = ? AND (r.status = 'succeeded' OR r.id = ?) AND ro.run_id <> ?
          ORDER BY CASE WHEN r.mode = '${BASELINE_MODE}' THEN 0 ELSE 1 END, ro.seq`, [kind, key, includeRun, excludeRun]);
     const replayRows = (kind, rows) => replay(kind, rows.map(r => ({ payload: parse(r.payload),
-        source: r.source === 'manual_import' && r.run_summary && parse(r.run_summary).manualEntry === true ? 'manual_entry' : r.source })));
+        source: r.source === 'manual_import' && r.run_summary && parse(r.run_summary).manualEdit === true ? 'manual_edit'
+            : r.source === 'manual_import' && r.run_summary && parse(r.run_summary).manualEntry === true ? 'manual_entry' : r.source })));
 
     /**
      * Checks a state against the parents that exist now. An unknown master realm becomes NULL (as in
@@ -422,6 +436,12 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
         if (run.status !== 'succeeded' || run.mode === BASELINE_MODE) {
             throw new CatalogError('conflict', `A ${run.status} ${run.mode === BASELINE_MODE ? 'baseline ' : ''}run cannot be rolled back.`);
         }
+        const [meta] = await q.query('SELECT summary FROM catalog_runs WHERE id = ?', [runId]);
+        const move = meta.summary && parse(meta.summary).identityMove;
+        if (move && (await q.query('SELECT to_key FROM catalog_entity_aliases WHERE entity_kind = ? AND from_key = ?', [move.kind, move.to])).length) throw new CatalogError('conflict', 'Undo the later rename before this one.');
+        if (move && (await q.query(`SELECT 1 AS present FROM catalog_run_observations ro JOIN catalog_observations o ON o.id = ro.observation_id JOIN catalog_runs r ON r.id = ro.run_id
+            WHERE o.entity_kind = ? AND o.entity_key = ? AND ro.run_id <> ? AND r.status = 'succeeded'
+            AND ro.seq > (SELECT MAX(seq) FROM catalog_run_observations WHERE run_id = ?) LIMIT 1`, [move.kind, move.to, runId, runId])).length) throw new CatalogError('conflict', 'This renamed entry has newer updates. Undo those first, or use Edit entry to change it again.');
         const touched = await q.query(
             `SELECT DISTINCT o.entity_kind, o.entity_key FROM catalog_run_observations ro
              JOIN catalog_observations o ON o.id = ro.observation_id WHERE ro.run_id = ?`, [runId]);
@@ -493,7 +513,48 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
     async function performRollback(tx, runId, planId) {
         const computed = await computeRollback(tx, runId);
         const before = await servingCounts(tx);
+        const [metadata] = await tx.query('SELECT summary FROM catalog_runs WHERE id = ?', [runId]);
+        const edit = metadata.summary ? parse(metadata.summary) : {};
+        if (edit.identityMove) {
+            const move = edit.identityMove;
+            await tx.query('DELETE FROM catalog_entity_aliases WHERE run_id = ?', [runId]);
+            await tx.query('UPDATE catalog_guide_ids SET entity_key = ? WHERE entity_kind = ? AND entity_key = ?', [move.from, move.kind, move.to]);
+            await tx.query('UPDATE catalog_field_states SET entity_key = ? WHERE entity_kind = ? AND entity_key = ?', [move.from, move.kind, move.to]);
+        }
+        const restoreStates = async rows => {
+            for (const field of rows) {
+                const [source] = await tx.query('SELECT status FROM catalog_runs WHERE id = ?', [field.run_id]);
+                if (source?.status !== 'succeeded') continue;
+                await tx.query('INSERT IGNORE INTO catalog_field_states (entity_kind, entity_key, field_path, state, value_json, run_id) VALUES (?, ?, ?, ?, ?, ?)', [field.entity_kind, field.entity_key, field.field_path, field.state, field.value_json, field.run_id]);
+            }
+        };
+        const guideUpdates = await tx.query('SELECT * FROM catalog_guide_field_updates WHERE run_id = ?', [runId]);
+        await tx.query('DELETE FROM catalog_field_states WHERE run_id = ?', [runId]);
+        if (edit.fieldStatesBefore) await restoreStates(edit.fieldStatesBefore);
+        if (edit.relatedFieldStatesBefore) await restoreStates(edit.relatedFieldStatesBefore);
+        const pendingResets = [];
+        for (const update of guideUpdates) {
+            const removing = computed.remove.some(row => row.kind === update.entity_kind && row.key === update.entity_key);
+            const restorePending = removing && update.before_manual;
+            if (restorePending) await tx.query('UPDATE catalog_field_states SET entity_key = ? WHERE entity_kind = ? AND entity_key = ?', [update.source_key, update.entity_kind, update.entity_key]);
+            if (update.before_states) await restoreStates(parse(update.before_states).map(field => ({ ...field, entity_key: restorePending ? update.source_key : update.entity_key })));
+            if (restorePending) {
+                const entry = parse(update.before_manual);
+                await tx.query('INSERT IGNORE INTO catalog_manual_entries (entity_kind, entity_id, payload, name, realm_id, min_level, run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [entry.entity_kind, entry.entity_id, entry.payload, entry.name, entry.realm_id, entry.min_level, entry.run_id, entry.created_at]);
+                pendingResets.push(update);
+                if (update.alias_from) {
+                    await tx.query('DELETE FROM catalog_entity_aliases WHERE entity_kind = ? AND from_key = ? AND run_id = ?', [update.entity_kind, update.alias_from, runId]);
+                    if (update.before_alias) await applyEntity(tx, update.entity_kind, { ...parse(update.before_alias), $raw: SCHEMAS[update.entity_kind].json }, { merge: false });
+                }
+            }
+        }
         await tx.query('DELETE FROM catalog_manual_entries WHERE run_id = ?', [runId]);
+        if (edit.pendingBefore) {
+            const entry = edit.pendingBefore;
+            const [previous] = await tx.query('SELECT status FROM catalog_runs WHERE id = ?', [entry.run_id]);
+            if (previous?.status === 'succeeded') await tx.query('INSERT INTO catalog_manual_entries (entity_kind, entity_id, payload, name, realm_id, min_level, run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [entry.entity_kind, entry.entity_id, entry.payload, entry.name, entry.realm_id, entry.min_level, entry.run_id, entry.created_at]);
+        }
         for (const r of computed.remove) {
             await removeEntity(tx, r.kind, r.payload, { dryRun: false });
             await tx.query('DELETE FROM catalog_entities WHERE entity_kind = ? AND entity_key = ?', [r.kind, r.key]);
@@ -501,7 +562,7 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
         let orphaned = 0;
         for (const r of computed.restore) {
             // Removals ran first, so parent checks see the post-rollback tables.
-            const payload = await resolveParents(tx, r.kind, r.payload);
+            const payload = await resolveParents(tx, r.kind, await applyFieldValues(tx, r.kind, r.key, r.payload));
             const [state] = await tx.query('SELECT first_seen_at FROM catalog_entities WHERE entity_kind = ? AND entity_key = ?', [r.kind, r.key]);
             await tx.query('DELETE FROM catalog_entities WHERE entity_kind = ? AND entity_key = ?', [r.kind, r.key]);
             if (!payload) {
@@ -513,7 +574,26 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
             await tx.query('INSERT INTO catalog_entities (entity_kind, entity_key, observation_id, last_run_id, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)',
                 [r.kind, r.key, r.observationId, r.runId, state?.first_seen_at ?? r.observedAt, r.observedAt]);
         }
+        // Policy filtering can hide a still-valid Guide relation. Once that policy is undone,
+        // replay the affected relation states as well as the directly touched observations.
+        const related = new Set();
+        for (const row of edit.manualEdit || edit.manualEntry || guideUpdates.length ? [...computed.restore, ...computed.remove] : []) {
+            const patterns = row.kind === 'creature' ? [`realm_creature:%:${row.key}`, `creature_drop:${row.key}:%`]
+                : row.kind === 'realm' ? [`realm_creature:${row.key}:%`] : row.kind === 'item' ? [`creature_drop:%:${row.key}`] : [];
+            for (const pattern of patterns) for (const relation of await tx.query("SELECT entity_key FROM catalog_entities WHERE entity_kind = 'relation' AND entity_key LIKE ?", [pattern])) related.add(relation.entity_key);
+        }
+        const relationRows = [];
+        for (const key of related) {
+            const rows = await provenanceOf(tx, 'relation', key, { excludeRun: runId });
+            if (!rows.length) continue;
+            const payload = await resolveParents(tx, 'relation', replayRows('relation', rows));
+            if (!payload) continue;
+            await applyEntity(tx, 'relation', payload, { merge: false });
+            relationRows.push(['relation', key, payload]);
+        }
+        await enforceFieldRelations(tx, [...computed.restore, ...computed.remove].map(row => [row.kind, row.key, row.payload]).concat(relationRows));
         await unverifyGuideDetails(tx, runId);
+        for (const update of pendingResets) await tx.query("UPDATE catalog_guide_ids SET entity_key = NULL, detail_status = 'pending', detail_hash = NULL, next_detail_at = ? WHERE entity_kind = ? AND entity_key = ?", [new Date(now() + GUIDE_POLICY.detailRefreshAfterMs).toISOString(), update.entity_kind, update.entity_key]);
         await refreshCompleteness(tx, [...computed.restore, ...computed.remove].map(r => [r.kind, r.key]), computed.remove);
         const after = await servingCounts(tx);
         const rows = {};
@@ -548,6 +628,8 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
      */
     async function completenessOf(q, kind, key) {
         const reasons = [];
+        const policies = await fieldStatesFor(q, kind, key);
+        if (policies.some(field => field.state === 'incomplete')) reasons.push('manual_field_incomplete');
         const natural = kind === 'relic' || kind === 'quest';
         const [g] = await q.query(`SELECT detail_status, detail_checked_at FROM catalog_guide_ids WHERE entity_kind = ? AND ${natural ? 'entity_key' : 'entity_id'} = ?`, [kind, natural ? key : Number(key)]);
         if (!g || g.detail_status === 'pending' || g.detail_status === 'missing') reasons.push('guide_detail_missing');
@@ -557,28 +639,43 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
         const [row] = natural
             ? await q.query(`SELECT * FROM ${table} WHERE realm_id = ? AND name = ? LIMIT 1`, [Number(String(key).slice(0, separator)), String(key).slice(separator + 1)])
             : await q.query(`SELECT * FROM ${table} WHERE id = ?`, [Number(key)]);
-        let requiredMissing = !row || !row.name;
+        if (natural && !row) {
+            const parentId = String(key).slice(0, separator);
+            const name = String(key).slice(separator + 1);
+            const field = kind === 'relic' ? 'relics' : 'quests';
+            const [membership] = (await fieldStatesFor(q, 'realm', parentId)).filter(policy => policy.field_path === field && policy.state !== 'incomplete');
+            if (membership && !(parse(membership.value_json) ?? []).some(value => (typeof value === 'string' ? value : value[kind === 'relic' ? 'relicName' : 'questName']) === name)) return {
+                completeness: g?.detail_status === 'ok' ? 'complete' : 'incomplete', reason: g?.detail_status === 'ok' ? null : 'guide_detail_missing', verifiedAt: g?.detail_checked_at ?? null,
+            };
+        }
+        const missing = [];
+        if (!row || !row.name) missing.push('name');
         if (row && (kind === 'item' || kind === 'creature')) {
             const stats = parseJsonColumn(row.stats);
-            requiredMissing ||= !stats || typeof stats !== 'object' || Array.isArray(stats) || !Object.values(stats).some(value => value !== null);
-            requiredMissing ||= !Array.isArray(parseJsonColumn(row.enhancements))
-                || !Array.isArray(parseJsonColumn(kind === 'item' ? row.droppedBy : row.droppedItems));
+            if (!stats || typeof stats !== 'object' || Array.isArray(stats) || !Object.values(stats).some(value => value !== null)) missing.push('stats');
+            if (!Array.isArray(parseJsonColumn(row.enhancements))) missing.push('enhancements');
+            if (!Array.isArray(parseJsonColumn(kind === 'item' ? row.droppedBy : row.droppedItems))) missing.push(kind === 'item' ? 'droppedBy' : 'droppedItems');
         }
-        if (row && kind === 'realm') requiredMissing ||= row.min_level == null
-            || !Array.isArray(parseJsonColumn(row.shops)) || !Array.isArray(parseJsonColumn(row.connections));
-        if (row && kind === 'master_realm') requiredMissing ||= !Array.isArray(parseJsonColumn(row.connected_realms));
+        if (row && kind === 'realm') {
+            if (row.min_level == null) missing.push('minLevel');
+            if (!Array.isArray(parseJsonColumn(row.shops))) missing.push('shops');
+            if (!Array.isArray(parseJsonColumn(row.connections))) missing.push('stairways');
+        }
+        if (row && kind === 'master_realm' && !Array.isArray(parseJsonColumn(row.connected_realms))) missing.push('realms');
         if (row && natural) {
             const details = parseJsonColumn(row.details);
-            requiredMissing ||= !details || typeof details !== 'object' || !Object.keys(details).length;
+            if (!details || typeof details !== 'object' || !Object.keys(details).length) missing.push('sections');
         }
-        if (requiredMissing) reasons.push('required_field_missing');
+        if (missing.some(path => !policies.some(field => field.field_path === path && field.state !== 'incomplete'))) reasons.push('required_field_missing');
         const drops = parseJsonColumn(kind === 'item' ? row?.droppedBy : row?.droppedItems);
         let unresolved = false;
-        if (kind === 'creature') {
+        const dropField = kind === 'item' ? 'droppedBy' : 'droppedItems';
+        const protectedDrops = policies.some(field => field.field_path === dropField && field.state !== 'incomplete');
+        if (kind === 'creature' && !protectedDrops) {
             for (const itemId of idsFrom(drops)) {
                 if (!(await q.query('SELECT 1 AS present FROM items WHERE id = ?', [itemId])).length) { unresolved = true; break; }
             }
-        } else if (kind === 'item' && Array.isArray(drops)) {
+        } else if (kind === 'item' && Array.isArray(drops) && !protectedDrops) {
             for (const d of drops) {
                 const name = typeof d === 'string' ? d : (d?.creatureName ?? d?.name);
                 if (typeof name !== 'string' || !name.trim()) continue;
@@ -645,6 +742,48 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
         const [current] = await tx.query('SELECT status, summary, mode FROM catalog_runs WHERE id = ? FOR UPDATE', [runId]);
         if (!current) throw new CatalogError('not_found', 'Unknown catalog run.');
         if (current.status !== 'running') throw new CatalogError('conflict', `A ${current.status} run cannot be projected.`);
+        const updates = await tx.query('SELECT * FROM catalog_guide_field_updates WHERE run_id = ?', [runId]);
+        for (const update of updates) {
+            const fields = await fieldStatesFor(tx, update.entity_kind, update.source_key);
+            await tx.query('UPDATE catalog_guide_field_updates SET before_states = ? WHERE run_id = ? AND entity_kind = ? AND entity_key = ?', [canonicalJson(fields), runId, update.entity_kind, update.entity_key]);
+            if (update.source_key.startsWith('manual:')) {
+                const [entry] = await tx.query('SELECT * FROM catalog_manual_entries WHERE entity_kind = ? AND entity_id = ?', [update.entity_kind, Number(update.source_key.slice(7))]);
+                if (entry) await tx.query('UPDATE catalog_guide_field_updates SET before_manual = ? WHERE run_id = ? AND entity_kind = ? AND entity_key = ?', [canonicalJson(entry), runId, update.entity_kind, update.entity_key]);
+            }
+            if (update.source_key !== update.entity_key) await tx.query('UPDATE catalog_field_states SET entity_key = ? WHERE entity_kind = ? AND entity_key = ?', [update.entity_key, update.entity_kind, update.source_key]);
+            if (update.alias_from) {
+                const separator = update.alias_from.indexOf(':');
+                const identity = { realm_id: Number(update.alias_from.slice(0, separator)), name: update.alias_from.slice(separator + 1) };
+                const baseline = await snapshotServing(tx, update.entity_kind, identity);
+                if (baseline) {
+                    await tx.query('UPDATE catalog_guide_field_updates SET before_alias = ? WHERE run_id = ? AND entity_kind = ? AND entity_key = ?', [canonicalJson(baseline), runId, update.entity_kind, update.entity_key]);
+                    await removeEntity(tx, update.entity_kind, identity, { dryRun: false });
+                }
+                await tx.query('INSERT IGNORE INTO catalog_entity_aliases (entity_kind, from_key, to_key, run_id) VALUES (?, ?, ?, ?)', [update.entity_kind, update.alias_from, update.entity_key, runId]);
+            }
+            const record = parse(update.payload);
+            for (const field of fields) {
+                let value = fieldValueAt(record, field.field_path);
+                if (field.field_path === 'imageUrl' && typeof value === 'string') value = canonicalImageUrl(value);
+                if (update.entity_kind === 'realm' && ['relics', 'quests'].includes(field.field_path) && Array.isArray(value)) {
+                    const targetKind = field.field_path === 'relics' ? 'relic' : 'quest';
+                    const nameField = targetKind === 'relic' ? 'relicName' : 'questName';
+                    const remapped = [];
+                    for (const entry of value) {
+                        const name = typeof entry === 'string' ? entry : entry[nameField];
+                        const resolved = await resolveEntityKey(tx, targetKind, `${record.id}:${name}`);
+                        const separator = resolved.indexOf(':');
+                        if (Number(resolved.slice(0, separator)) !== record.id) continue;
+                        const currentName = resolved.slice(separator + 1);
+                        remapped.push(typeof entry === 'string' ? currentName : { ...entry, [nameField]: currentName });
+                    }
+                    value = remapped;
+                }
+                if (field.state !== 'incomplete' || value == null || typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length
+                    || field.field_path === 'realms' && update.entity_kind === 'creature' && Array.isArray(value) && !value.length) continue;
+                await tx.query("UPDATE catalog_field_states SET state = 'complete', value_json = ?, run_id = ? WHERE entity_kind = ? AND entity_key = ? AND field_path = ?", [canonicalJson(value), runId, update.entity_kind, update.entity_key, field.field_path]);
+            }
+        }
         const rows = await tx.query(
             `SELECT o.id, o.entity_kind, o.entity_key, o.payload, ro.observed_at FROM catalog_run_observations ro
              JOIN catalog_observations o ON o.id = ro.observation_id WHERE ro.run_id = ? ORDER BY ro.seq`, [runId]);
@@ -678,13 +817,16 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
             }
             // Rebuild from all provenance (baseline, earlier runs, this run) under source
             // precedence, so a lower-ranked source never overwrites a higher-ranked field.
-            const rebuilt = await resolveParents(tx, kind, replayRows(kind, await provenanceOf(tx, kind, row.entity_key, { includeRun: runId })));
+            let rebuilt = replayRows(kind, await provenanceOf(tx, kind, row.entity_key, { includeRun: runId }));
+            rebuilt = await applyFieldValues(tx, kind, row.entity_key, rebuilt);
+            rebuilt = await resolveParents(tx, kind, rebuilt);
             await applyEntity(tx, kind, rebuilt ?? payload, { merge: false }); // no state: let the foreign key reject it
             await tx.query('DELETE FROM catalog_entities WHERE entity_kind = ? AND entity_key = ?', [kind, row.entity_key]);
             await tx.query('INSERT INTO catalog_entities (entity_kind, entity_key, observation_id, last_run_id, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)',
                 [kind, row.entity_key, row.id, runId, firstSeen, row.observed_at]);
             counts.projected++;
         }
+        await enforceFieldRelations(tx, rows.map(row => [row.entity_kind, row.entity_key, parse(row.payload)]));
         await refreshCompleteness(tx, rows.map(r => [r.entity_kind, r.entity_key]));
         const summary = { ...(current.summary ? JSON.parse(current.summary) : {}), observations: rows.length, ...counts };
         await tx.query('UPDATE catalog_runs SET status = ?, finished_at = ?, summary = ? WHERE id = ?', ['succeeded', iso(), JSON.stringify(summary), runId]);
@@ -727,12 +869,343 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
         paused: ['queued', 'running', 'cancelled'],
     };
 
+    const fieldStatesFor = (q, kind, key) => q.query('SELECT * FROM catalog_field_states WHERE entity_kind = ? AND entity_key = ? ORDER BY field_path', [kind, key]);
+
+    async function applyFieldValues(q, kind, key, payload) {
+        if (kind === 'relation') return payload;
+        const fields = await fieldStatesFor(q, kind, key);
+        const result = JSON.parse(JSON.stringify(payload));
+        for (const field of fields.sort((a, b) => a.field_path.split('.').length - b.field_path.split('.').length)) {
+            const [name, ...parts] = field.field_path.split('.');
+            const column = EDIT_COLUMNS[kind]?.[name];
+            const rawValue = parse(field.value_json);
+            const value = column === 'imageUrl' && typeof rawValue === 'string' ? canonicalImageUrl(rawValue) : rawValue;
+            if (name === 'sections') setFieldValue(result, 'details.sections', value ?? []);
+            else if (column) {
+                if (name === 'details' && value && typeof value === 'object' && !Array.isArray(value)) result.details = { ...(result.details?.sections ? { sections: result.details.sections } : {}), ...value };
+                else setFieldValue(result, [column, ...parts].join('.'), value);
+            }
+        }
+        return result;
+    }
+
+    async function writeFieldStates(q, kind, key, previous, patch, requested, runId, allowed, defaultState) {
+        const combined = { ...previous, ...patch };
+        const normalizePath = path => {
+            while (path && !allowed.includes(path)) path = path.split('.').slice(0, -1).join('.');
+            return path;
+        };
+        const changed = changedFieldPaths(previous, patch).map(normalizePath).filter(path => path && !Object.keys(requested).some(parent => path.startsWith(`${parent}.`)));
+        const paths = new Set([...changed, ...Object.keys(requested)]);
+        const old = await fieldStatesFor(q, kind, key);
+        for (const path of Object.keys(requested)) for (const child of old) {
+            if (child.field_path.startsWith(`${path}.`) && !Object.hasOwn(requested, child.field_path)) await q.query('DELETE FROM catalog_field_states WHERE entity_kind = ? AND entity_key = ? AND field_path = ?', [kind, key, child.field_path]);
+        }
+        for (const path of paths) {
+            const rawValue = fieldValueAt(combined, path) ?? null;
+            const value = path === 'imageUrl' && typeof rawValue === 'string' ? canonicalImageUrl(rawValue) : rawValue;
+            const state = requested[path] ?? defaultState;
+            if (SCHEMAS[kind].natural && ['name', 'realmId'].includes(path) && state !== 'incomplete' && value == null) throw invalid('Enter a value before protecting a relic or quest identity field.', 'fieldStates');
+            await q.query('INSERT INTO catalog_field_states (entity_kind, entity_key, field_path, state, value_json, run_id) VALUES (?, ?, ?, ?, ?, ?) AS new ON DUPLICATE KEY UPDATE state = new.state, value_json = new.value_json, run_id = new.run_id', [kind, key, path, state, canonicalJson(value), runId]);
+        }
+    }
+
+    async function enforceFieldRelations(q, entities) {
+        const targets = new Map();
+        for (const [kind, key, payload] of entities) {
+            targets.set(`${kind}|${key}`, [kind, key]);
+            if (kind === 'relation') for (const [target, id] of payload.type === 'realm_creature' ? [['realm', payload.realm_id], ['creature', payload.creature_id]] : [['item', payload.item_id], ['creature', payload.creature_id]]) targets.set(`${target}|${id}`, [target, String(id)]);
+            if ((kind === 'relic' || kind === 'quest') && payload.realm_id) targets.set(`realm|${payload.realm_id}`, ['realm', String(payload.realm_id)]);
+        }
+        for (const [kind, key] of targets.values()) {
+            if (!['creature', 'realm', 'item'].includes(kind)) continue;
+            if (!(await q.query(`SELECT id FROM ${SCHEMAS[kind].table} WHERE id = ?`, [Number(key)])).length) continue;
+            const fields = await fieldStatesFor(q, kind, key);
+            for (const field of fields) {
+                const values = parse(field.value_json) ?? [];
+                if (kind === 'realm' && ['relics', 'quests'].includes(field.field_path)) {
+                    const names = values.map(value => typeof value === 'string' ? value : value[field.field_path === 'relics' ? 'relicName' : 'questName']);
+                    const table = field.field_path === 'relics' ? 'relics' : 'quests';
+                    for (const row of await q.query(`SELECT name FROM ${table} WHERE realm_id = ?`, [Number(key)])) if (!names.includes(row.name)) await q.query(`DELETE FROM ${table} WHERE realm_id = ? AND name = ?`, [Number(key), row.name]);
+                }
+                let table, parent, child, desired;
+                if (kind === 'creature' && field.field_path === 'realms') [table, parent, child, desired] = ['realm_creatures', 'creature_id', 'realm_id', values.map(r => r.realmId)];
+                if (kind === 'creature' && field.field_path === 'droppedItems') [table, parent, child, desired] = ['creature_drops', 'creature_id', 'item_id', values.map(r => r.itemId)];
+                if (kind === 'realm' && field.field_path === 'creatures') [table, parent, child, desired] = ['realm_creatures', 'realm_id', 'creature_id', values.map(r => r.creatureId)];
+                if (kind === 'item' && field.field_path === 'droppedBy') {
+                    const found = new Set();
+                    for (const value of values) {
+                        const names = dropNames(value.creatureName);
+                        for (const row of await q.query(`SELECT id FROM creatures WHERE name IN (${names.map(() => '?').join(', ')})`, names)) found.add(Number(row.id));
+                    }
+                    [table, parent, child, desired] = ['creature_drops', 'item_id', 'creature_id', [...found]];
+                }
+                if (!table) continue;
+                const old = await q.query(`SELECT ${child} FROM ${table} WHERE ${parent} = ?`, [Number(key)]);
+                for (const row of old) if (!desired.includes(Number(row[child]))) {
+                    await q.query(`DELETE FROM ${table} WHERE ${parent} = ? AND ${child} = ?`, [Number(key), row[child]]);
+                    if (table === 'realm_creatures') await syncRealmCreatureJson(q, parent === 'realm_id' ? Number(key) : Number(row[child]), parent === 'creature_id' ? Number(key) : Number(row[child]), false);
+                }
+                for (const id of desired) {
+                    const target = child === 'realm_id' ? 'realms' : child === 'creature_id' ? 'creatures' : 'items';
+                    if (!(await q.query(`SELECT id FROM ${target} WHERE id = ?`, [id])).length) continue;
+                    await q.query(`INSERT IGNORE INTO ${table} (${parent}, ${child}) VALUES (?, ?)`, [Number(key), id]);
+                    if (table === 'realm_creatures') await syncRealmCreatureJson(q, parent === 'realm_id' ? Number(key) : id, parent === 'creature_id' ? Number(key) : id, true);
+                }
+            }
+        }
+    }
+
+    async function resolveEntityKey(q, kind, key) {
+        if (!SCHEMAS[kind]?.natural) return key;
+        const seen = new Set();
+        while (!seen.has(key)) {
+            seen.add(key);
+            const [alias] = await q.query('SELECT to_key FROM catalog_entity_aliases WHERE entity_kind = ? AND from_key = ?', [kind, key]);
+            if (!alias) return key;
+            key = alias.to_key;
+        }
+        throw new CatalogError('conflict', 'This identity would create a rename cycle.');
+    }
+
+    async function editingSnapshot(q, kind, key) {
+        const spec = SCHEMAS[kind];
+        if (!spec || kind === 'relation') throw invalid('Unknown catalog kind.', 'kind');
+        const policies = await fieldStatesFor(q, kind, key);
+        const fieldStates = Object.fromEntries(policies.map(field => [field.field_path, field.state]));
+        if (spec.natural && /^manual:[1-9]\d{0,7}$/.test(key)) {
+            const [entry] = await q.query('SELECT * FROM catalog_manual_entries WHERE entity_kind = ? AND entity_id = ?', [kind, Number(key.slice(7))]);
+            if (!entry) throw new CatalogError('not_found', 'Unknown manual entry.');
+            return { record: parse(entry.payload), version: sha256(canonicalJson({ entry, policies })), pending: entry, fieldStates, policies };
+        }
+        const match = spec.natural ? String(key).match(/^(\d{1,18}):(.{1,191})$/s) : String(key).match(/^\d{1,18}$/);
+        if (!match) throw invalid('Invalid entity key.', 'key');
+        const table = kind === 'quest' ? 'quests' : spec.table;
+        const [raw] = await q.query(`SELECT * FROM ${table} WHERE ${spec.natural ? 'realm_id = ? AND name = ?' : 'id = ?'} LIMIT 1`, spec.natural ? [Number(match[1]), match[2]] : [Number(key)]);
+        if (!raw) throw new CatalogError('not_found', 'Unknown entity.');
+        const row = Object.fromEntries(Object.entries(raw).map(([name, value]) => [name, typeof value === 'bigint' ? Number(value) : spec.json.includes(name) ? parseJsonColumn(value) : value]));
+        const record = { id: Number(row.id) };
+        for (const [field, column] of Object.entries(EDIT_COLUMNS[kind])) if (row[column] != null) record[field] = row[column];
+        const relations = {};
+        if (kind === 'item') {
+            relations.creatures = await q.query('SELECT c.id AS creatureId, c.name AS creatureName FROM creature_drops cd JOIN creatures c ON c.id = cd.creature_id WHERE cd.item_id = ? ORDER BY c.id', [row.id]);
+            const drops = (Array.isArray(record.droppedBy) ? record.droppedBy : []).map(r => typeof r === 'string' ? { creatureName: r } : r);
+            for (const creature of relations.creatures) if (!drops.some(drop => dropNames(drop.creatureName ?? '').includes(creature.creatureName))) drops.push({ creatureName: creature.creatureName });
+            record.droppedBy = drops;
+        }
+        if (kind === 'creature') {
+            relations.realms = await q.query('SELECT r.id AS realmId, r.name AS realmName FROM realm_creatures rc JOIN realms r ON r.id = rc.realm_id WHERE rc.creature_id = ? ORDER BY r.id', [row.id]);
+            relations.drops = await q.query('SELECT i.id AS itemId, i.name AS itemName FROM creature_drops cd JOIN items i ON i.id = cd.item_id WHERE cd.creature_id = ? ORDER BY i.id', [row.id]);
+            record.realms = relations.realms.map(r => ({ realmId: Number(r.realmId), ...(r.realmName ? { realmName: r.realmName } : {}) }));
+            const drops = new Map((Array.isArray(record.droppedItems) ? record.droppedItems : []).map(r => [Number(typeof r === 'number' ? r : r.itemId ?? r.id), typeof r === 'number' ? { itemId: r } : r]));
+            for (const r of relations.drops) if (!drops.has(Number(r.itemId))) drops.set(Number(r.itemId), { itemId: Number(r.itemId), ...(r.itemName ? { itemName: r.itemName } : {}) });
+            record.droppedItems = [...drops.values()];
+        }
+        if (kind === 'realm') {
+            relations.creatures = await q.query('SELECT c.id AS creatureId, c.name AS creatureName FROM realm_creatures rc JOIN creatures c ON c.id = rc.creature_id WHERE rc.realm_id = ? ORDER BY c.id', [row.id]);
+            relations.relics = await q.query('SELECT name FROM relics WHERE realm_id = ? ORDER BY name', [row.id]);
+            relations.quests = await q.query('SELECT name FROM quests WHERE realm_id = ? ORDER BY name', [row.id]);
+            record.creatures = relations.creatures.map(r => ({ creatureId: Number(r.creatureId), ...(r.creatureName ? { creatureName: r.creatureName } : {}) }));
+            record.relics = relations.relics.map(r => r.name);
+            record.quests = relations.quests.map(r => ({ questName: r.name }));
+        }
+        if (spec.natural && row.details && typeof row.details === 'object' && !Array.isArray(row.details)) {
+            const { sections, ...extra } = row.details;
+            if (sections) record.sections = sections;
+            if (Object.keys(extra).length) record.details = extra; else delete record.details;
+        }
+        const version = sha256(canonicalJson({ row, relations, policies }));
+        return { record, version, row, relations, fieldStates, policies };
+    }
+
+    async function addEditObservations(tx, kind, key, changes, snapshot) {
+        const spec = SCHEMAS[kind];
+        const current = snapshot.row;
+        const payload = { ...(spec.natural ? { realm_id: Number(current.realm_id), name: current.name, $deleted: false } : { id: Number(current.id) }) };
+        for (const [field, column] of Object.entries(EDIT_COLUMNS[kind])) if (Object.hasOwn(changes, field)) payload[column] = changes[field];
+        if (spec.natural && Object.hasOwn(changes, 'details') && (changes.details == null || typeof changes.details === 'object' && !Array.isArray(changes.details))) payload.details = {
+            ...(current.details?.sections ? { sections: current.details.sections } : {}), ...(changes.details ?? {}),
+        };
+        if (spec.natural && Object.hasOwn(changes, 'sections')) payload.details = { ...(Object.hasOwn(changes, 'details') ? changes.details : current.details) ?? {}, sections: changes.sections ?? [] };
+        const nextKey = entityKey(kind, payload);
+        const observations = [];
+        if (nextKey !== key) {
+            if (await resolveEntityKey(tx, kind, nextKey) !== nextKey) throw new CatalogError('conflict', 'That realm/name identity is already in use.');
+            if (await snapshotServing(tx, kind, payload)) throw new CatalogError('conflict', 'That realm/name identity already exists.');
+            observations.push({ kind, payload: { realm_id: Number(current.realm_id), name: current.name, $deleted: true } });
+            // Carry omitted data as a baseline so future Guide details can still fill it.
+            const baseline = Object.fromEntries(Object.keys(spec.columns).map(column => [column, current[column] ?? null]));
+            observations.push({ kind, source: 'guide_baseline', payload: { ...baseline, realm_id: payload.realm_id, name: payload.name } });
+        }
+        observations.push({ kind, payload });
+        const references = [];
+        const ensure = async (targetKind, id, name) => {
+            const target = SCHEMAS[targetKind];
+            if (!(await tx.query(`SELECT id FROM ${target.table} WHERE id = ?`, [id])).length) observations.push({ kind: targetKind, payload: { id, ...(name ? { name } : {}) } });
+            references.push({ kind: targetKind, id });
+        };
+        if (spec.natural && payload.realm_id !== Number(current.realm_id)) await ensure('realm', payload.realm_id);
+        if (kind === 'realm' && payload.master_realm_id != null) await ensure('master_realm', payload.master_realm_id);
+        const replaceRelations = async (field, type, parentColumn, childColumn, childKind, idField, nameField, existing) => {
+            if (!Object.hasOwn(changes, field)) return;
+            const rows = changes[field] ?? [];
+            const desired = new Set(rows.map(r => r[idField]));
+            for (const old of existing) if (!desired.has(Number(old[idField]))) observations.push({ kind: 'relation', payload: { type, [parentColumn]: Number(current.id), [childColumn]: Number(old[idField]), present: false } });
+            for (const row of rows) {
+                await ensure(childKind, row[idField], row[nameField]);
+                observations.push({ kind: 'relation', payload: { type, [parentColumn]: Number(current.id), [childColumn]: row[idField], present: true } });
+            }
+        };
+        if (kind === 'creature') {
+            await replaceRelations('realms', 'realm_creature', 'creature_id', 'realm_id', 'realm', 'realmId', 'realmName', snapshot.relations.realms);
+            await replaceRelations('droppedItems', 'creature_drop', 'creature_id', 'item_id', 'item', 'itemId', 'itemName', snapshot.relations.drops);
+        }
+        if (kind === 'item' && Object.hasOwn(changes, 'droppedBy')) {
+            const desired = new Map();
+            for (const row of changes.droppedBy ?? []) {
+                const names = dropNames(row.creatureName);
+                const creatures = await tx.query(`SELECT id, name FROM creatures WHERE name IN (${names.map(() => '?').join(', ')})`, names);
+                for (const creature of creatures) desired.set(Number(creature.id), { creatureId: Number(creature.id), creatureName: creature.name });
+            }
+            const existing = new Set(snapshot.relations.creatures.map(r => Number(r.creatureId)));
+            for (const id of existing) if (!desired.has(id)) observations.push({ kind: 'relation', payload: { type: 'creature_drop', item_id: Number(current.id), creature_id: id, present: false } });
+            for (const id of desired.keys()) observations.push({ kind: 'relation', payload: { type: 'creature_drop', item_id: Number(current.id), creature_id: id, present: true } });
+        }
+        if (kind === 'realm') {
+            await replaceRelations('creatures', 'realm_creature', 'realm_id', 'creature_id', 'creature', 'creatureId', 'creatureName', snapshot.relations.creatures);
+            for (const [field, targetKind, nameField] of [['relics', 'relic', 'relicName'], ['quests', 'quest', 'questName']]) {
+                if (!Object.hasOwn(changes, field)) continue;
+                const names = (changes[field] ?? []).map(r => typeof r === 'string' ? r : r[nameField]);
+                for (const old of snapshot.relations[field]) if (!names.includes(old.name)) observations.push({ kind: targetKind, payload: { realm_id: Number(current.id), name: old.name, $deleted: true } });
+                for (const name of names) observations.push({ kind: targetKind, payload: { realm_id: Number(current.id), name, $deleted: false } });
+            }
+        }
+        if (kind === 'master_realm' && Object.hasOwn(changes, 'realms')) {
+            const desired = changes.realms ?? [];
+            const prior = await tx.query('SELECT id FROM realms WHERE master_realm_id = ?', [current.id]);
+            for (const row of prior) if (!desired.some(r => r.realmId === Number(row.id))) observations.push({ kind: 'realm', payload: { id: Number(row.id), master_realm_id: null } });
+            for (const row of desired) {
+                await ensure('realm', row.realmId, row.realmName);
+                observations.push({ kind: 'realm', payload: { id: row.realmId, master_realm_id: Number(current.id) } });
+            }
+        }
+        return { observations, references, nextKey };
+    }
+
     return {
+        /** Merges protected owner fields into a validated Guide record, field by field.
+         * @param {string} kind Guide kind.
+         * @param {number} id Guide ID.
+         * @param {object} record Validated Guide record.
+         * @param {string} key Normalized identity.
+         * @returns {Promise<object>} Merged record and a transactional field-update descriptor.
+         */
+        async prepareGuideFields(kind, id, record, key) {
+            const target = await resolveEntityKey(db, kind, key);
+            const pending = SCHEMAS[kind].natural && (await db.query('SELECT entity_id FROM catalog_manual_entries WHERE entity_kind = ? AND entity_id = ?', [kind, id])).length;
+            const [tracking] = SCHEMAS[kind].natural ? await db.query('SELECT entity_key FROM catalog_guide_ids WHERE entity_kind = ? AND entity_id = ?', [kind, id]) : [];
+            const trackedKey = tracking?.entity_key ? await resolveEntityKey(db, kind, tracking.entity_key) : target;
+            const sourceKey = pending ? `manual:${id}` : trackedKey;
+            const fields = await fieldStatesFor(db, kind, sourceKey);
+            const merged = JSON.parse(JSON.stringify(record));
+            for (const field of fields.sort((a, b) => a.field_path.split('.').length - b.field_path.split('.').length)) {
+                if (field.state !== 'incomplete') setFieldValue(merged, field.field_path, parse(field.value_json));
+                else {
+                    const value = fieldValueAt(record, field.field_path);
+                    if (value !== undefined) setFieldValue(merged, field.field_path, value);
+                }
+            }
+            const desired = SCHEMAS[kind].natural ? `${merged.realmId}:${merged.name}` : target;
+            return { record: merged, update: fields.length ? { kind, key: desired, sourceKey, record, aliasFrom: target !== desired ? target : null } : null };
+        },
+        /** Resolves a natural identity after an owner rename.
+         * @param {string} kind Entity kind.
+         * @param {string} key Original catalog key.
+         * @returns {Promise<string>} Current key.
+         */
+        resolveEntityKey: (kind, key) => resolveEntityKey(db, kind, key),
+
+        /** Reads typed editable fields with an optimistic concurrency token.
+         * @param {string} kind Catalog kind.
+         * @param {string} key Catalog key.
+         * @returns {Promise<object>} Record and version.
+         */
+        async getEditingRecord(kind, key) {
+            const snapshot = await editingSnapshot(db, kind, key);
+            const [catalog] = await db.query('SELECT completeness FROM catalog_entities WHERE entity_kind = ? AND entity_key = ?', [kind, key]);
+            return { record: snapshot.record, version: snapshot.version, fieldStates: snapshot.fieldStates, defaultFieldState: catalog?.completeness === 'complete' ? 'complete' : 'incomplete' };
+        },
+
+        /** Saves an owner patch, its provenance and relationship replacements atomically.
+         * @param {object} input Validated kind, key, record patch and expected version.
+         * @returns {Promise<object>} Run and resulting identity.
+         */
+        async editEntry({ kind, key, record, version, fieldStates = {}, policyPaths = [] }) {
+            const result = await db.transaction(async tx => {
+                await lockRevision(tx);
+                const snapshot = await editingSnapshot(tx, kind, key);
+                if (snapshot.version !== version) throw new CatalogError('conflict', 'This entry changed since you opened it. Reopen it before saving.');
+                const at = iso();
+                const runId = uuid();
+                const changes = { ...record };
+                delete changes.id;
+                const mapped = snapshot.pending ? { observations: [], references: [], nextKey: key } : await addEditObservations(tx, kind, key, changes, snapshot);
+                const normalized = mapped.observations.map(o => ({ ...normalizeObservation(o.kind, o.payload), source: o.source ?? 'manual_import' }));
+                const summary = { manualEdit: true, fieldStatesBefore: snapshot.policies, fieldStateKey: { kind, from: key, to: mapped.nextKey }, ...(snapshot.pending ? { pendingBefore: snapshot.pending } : {}),
+                    ...(mapped.nextKey !== key ? { identityMove: { kind, from: key, to: mapped.nextKey } } : {}) };
+                await tx.query('INSERT INTO catalog_runs (id, mode, source, status, started_at, summary) VALUES (?, ?, ?, ?, ?, ?)', [runId, 'seed', 'manual_import', 'running', at, canonicalJson(summary)]);
+                for (const o of normalized) { const obs = await upsertObservation(tx, o.source, o, at); await linkObservation(tx, runId, obs.id, at); }
+                if (snapshot.pending) {
+                    const updated = { ...snapshot.record, ...changes };
+                    for (const [field, value] of Object.entries(updated)) if (value === null) delete updated[field];
+                    const json = canonicalJson(updated);
+                    if (Buffer.byteLength(json) > MAX_PAYLOAD_BYTES) throw invalid('Entry is too large.', 'record');
+                    await tx.query('UPDATE catalog_manual_entries SET payload = ?, name = ?, realm_id = ?, min_level = ?, run_id = ? WHERE entity_kind = ? AND entity_id = ?',
+                        [json, updated.name ?? null, updated.realmId ?? null, updated.minLevel ?? null, runId, kind, updated.id]);
+                }
+                if (summary.identityMove) {
+                    await tx.query('INSERT INTO catalog_entity_aliases (entity_kind, from_key, to_key, run_id) VALUES (?, ?, ?, ?)', [kind, key, mapped.nextKey, runId]);
+                    await tx.query('UPDATE catalog_guide_ids SET entity_key = ? WHERE entity_kind = ? AND entity_key = ?', [mapped.nextKey, kind, key]);
+                    await tx.query('UPDATE catalog_field_states SET entity_key = ? WHERE entity_kind = ? AND entity_key = ?', [mapped.nextKey, kind, key]);
+                    const field = kind === 'relic' ? 'relics' : 'quests';
+                    const fromRealm = Number(snapshot.row.realm_id);
+                    const toRealm = Number(mapped.nextKey.slice(0, mapped.nextKey.indexOf(':')));
+                    const nextName = mapped.nextKey.slice(mapped.nextKey.indexOf(':') + 1);
+                    const related = [];
+                    for (const realmId of new Set([fromRealm, toRealm])) {
+                        const [policy] = (await fieldStatesFor(tx, 'realm', String(realmId))).filter(row => row.field_path === field);
+                        if (!policy) continue;
+                        related.push(policy);
+                        const values = parse(policy.value_json) ?? [];
+                        const nameOf = value => typeof value === 'string' ? value : value[kind === 'relic' ? 'relicName' : 'questName'];
+                        const next = values.filter(value => !(realmId === fromRealm && nameOf(value) === snapshot.row.name));
+                        if (realmId === toRealm && !next.some(value => nameOf(value) === nextName)) next.push(kind === 'relic' ? nextName : { questName: nextName });
+                        await tx.query('UPDATE catalog_field_states SET value_json = ?, run_id = ? WHERE entity_kind = ? AND entity_key = ? AND field_path = ?', [canonicalJson(next), runId, 'realm', String(realmId), field]);
+                    }
+                    if (related.length) {
+                        summary.relatedFieldStatesBefore = related;
+                        await tx.query('UPDATE catalog_runs SET summary = ? WHERE id = ?', [canonicalJson(summary), runId]);
+                    }
+                }
+                await writeFieldStates(tx, kind, mapped.nextKey, snapshot.record, changes, fieldStates, runId, policyPaths, 'do_not_check');
+                if (!SCHEMAS[kind].natural && snapshot.record.id <= 10000000) await tx.query('INSERT IGNORE INTO catalog_guide_ids (entity_kind, entity_id, first_seen_at, next_detail_at) VALUES (?, ?, ?, ?)', [kind, snapshot.record.id, at, at]);
+                const natural = SCHEMAS[kind].natural && !snapshot.pending;
+                const incomplete = (await fieldStatesFor(tx, kind, mapped.nextKey)).some(field => field.state === 'incomplete');
+                await tx.query(`UPDATE catalog_guide_ids SET detail_status = 'pending', detail_hash = NULL, detail_checked_at = NULL, detail_attempts = 0, next_detail_at = ? WHERE entity_kind = ? AND ${natural ? 'entity_key' : 'entity_id'} = ? AND (detail_status <> 'ok' OR ? = 1)`,
+                    [at, kind, natural ? mapped.nextKey : snapshot.record.id, incomplete ? 1 : 0]);
+                for (const ref of mapped.references) await tx.query('INSERT IGNORE INTO catalog_guide_ids (entity_kind, entity_id, first_seen_at, next_detail_at) VALUES (?, ?, ?, ?)', [ref.kind, ref.id, at, at]);
+                await performProjection(tx, runId);
+                await bumpRevision(tx);
+                return { runId, key: mapped.nextKey };
+            });
+            invalidateCaches();
+            return result;
+        },
         /** Creates a provisional record and registers its Guide ID in one transaction.
          * @param {object} input Validated kind, Guide record and serving observations.
          * @returns {Promise<{runId: string, key: string}>} Created catalog identity.
          */
-        async createManualEntry({ kind, record, observations, references = [] }) {
+        async createManualEntry({ kind, record, observations, references = [], fieldStates = {}, policyPaths = [] }) {
             const normalized = observations.map(o => normalizeObservation(o.kind, o.payload));
             const payload = canonicalJson(record);
             if (Buffer.byteLength(payload) > MAX_PAYLOAD_BYTES) throw invalid('Manual entry is too large.', 'record');
@@ -756,6 +1229,7 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
                 }
                 if (natural) await tx.query('INSERT INTO catalog_manual_entries (entity_kind, entity_id, payload, name, realm_id, min_level, run_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
                     [kind, record.id, payload, record.name ?? null, record.realmId ?? null, record.minLevel ?? null, runId, at]);
+                await writeFieldStates(tx, kind, key, {}, record, fieldStates, runId, policyPaths, 'incomplete');
                 await tx.query('INSERT INTO catalog_guide_ids (entity_kind, entity_id, first_seen_at, next_detail_at) VALUES (?, ?, ?, ?) AS new ON DUPLICATE KEY UPDATE detail_status = \'pending\', detail_hash = NULL, detail_checked_at = NULL, detail_attempts = 0, next_detail_at = new.next_detail_at',
                     [kind, record.id, at, at]);
                 for (const ref of references) {
@@ -803,7 +1277,16 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
                 await lockRevision(tx);   // ordered against discardProjections(): a run is recorded before or after a reload
                 await tx.query('INSERT INTO catalog_runs (id, mode, source, status, started_at, summary) VALUES (?, ?, ?, ?, ?, ?)', [runId, mode, source, 'running', at, summaryJson]);
                 for (const o of normalized) {
-                    const obs = await upsertObservation(tx, source, o, o.observedAt);
+                    let normalizedObservation = o;
+                    if (SCHEMAS[o.kind]?.natural) {
+                        const resolved = await resolveEntityKey(tx, o.kind, o.key);
+                        if (resolved !== o.key) {
+                            const separator = resolved.indexOf(':');
+                            normalizedObservation = normalizeObservation(o.kind, { ...o.payload, realm_id: Number(resolved.slice(0, separator)), name: resolved.slice(separator + 1) });
+                        }
+                    }
+                    if (mode === 'guide_discovery' && source === 'guide_baseline' && (o.kind === 'relation' || SCHEMAS[o.kind]?.natural)) normalizedObservation = normalizeObservation(o.kind, { ...normalizedObservation.payload, ...(o.kind === 'relation' ? { present: true } : { $deleted: false }) });
+                    const obs = await upsertObservation(tx, source, normalizedObservation, o.observedAt);
                     if (obs.created) created++;
                     await linkObservation(tx, runId, obs.id, o.observedAt);
                 }
@@ -1022,6 +1505,8 @@ export function createCatalogStore(db, { now = Date.now, invalidateCaches = clea
             }
             await tx.query('DELETE FROM catalog_entities');
             await tx.query('DELETE FROM catalog_manual_entries');
+            await tx.query('DELETE FROM catalog_entity_aliases');
+            await tx.query('DELETE FROM catalog_field_states');
             // Baseline snapshots describe the rows being replaced, and a recorded but unprojected run
             // would repopulate them, so both are retired too. Only runs recorded later can project.
             const { affectedRows } = await tx.query("UPDATE catalog_runs SET status = 'discarded' WHERE status IN ('succeeded', 'running')");

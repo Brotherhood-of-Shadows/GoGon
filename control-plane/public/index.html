@@ -123,8 +123,9 @@
       </div>
 
       <div id="catalog-manual" class="subtab" hidden>
-        <h3>Add a catalog entry</h3>
-        <p class="muted">Only the Guide ID is required. All other Guide fields are optional. Manual entries start incomplete; scheduled Guide checks fill and verify their information when it becomes available. Existing IDs cannot be overwritten here.</p>
+        <h3 id="manual-entry-title">Add a catalog entry</h3>
+        <p class="muted">Only the Guide ID is required. All other Guide fields are optional. Manual entries start incomplete; scheduled Guide checks fill and verify their information when it becomes available. To update an existing entry, enter its ID and choose Open ID for editing, or use Edit entry in Browse.</p>
+        <p class="muted">Each field has its own Guide update label. <strong>Do not check</strong> preserves your value; <strong>Incomplete</strong> lets the Guide update it; <strong>Complete</strong> marks it fulfilled and preserves it. Other fields continue updating independently.</p>
         <form id="manual-entry-form" class="card" autocomplete="off">
           <label for="mf-kind">Kind</label>
           <select id="mf-kind">
@@ -132,8 +133,10 @@
             <option value="master_realm">Master realm</option><option value="relic">Relic</option><option value="quest">Quest</option>
           </select>
           <div id="manual-entry-fields" class="manual-fields"></div>
+          <button type="button" class="ghost" id="manual-entry-open">Open ID for editing</button>
           <p class="error field-error" role="alert" hidden></p>
           <button type="submit" id="manual-entry-save">Add incomplete entry</button>
+          <button type="button" class="ghost" id="manual-entry-cancel" hidden>Cancel editing</button>
         </form>
       </div>
 

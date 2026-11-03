@@ -9,7 +9,7 @@ import { getGuidePolicy } from './guidePolicy.js';
 import { GUIDE_ORDERING } from './contracts/guide.js';
 import { readOperations, unavailableReason } from './requestPolicy.js';
 import { describeSeedSources } from './sourceRegistry.js';
-import { manualRecordFields, validManualRecord, mapGuideRecord } from './guideNormalizers.js';
+import { manualRecordFields, manualPolicyFields, validManualRecord, validEditRecord, mapGuideRecord } from './guideNormalizers.js';
 
 export const BROWSE_KINDS = Object.freeze(['item', 'creature', 'realm', 'master_realm', 'relic', 'quest']);
 export const JOB_ACTIONS = Object.freeze({ pause: 'paused', resume: 'queued', cancel: 'cancelled' });
@@ -21,7 +21,7 @@ const SERVING = {
     item: { table: 'items', list: ['id', 'name', 'rarity', 'imageUrl'], detail: ['id', 'name', 'rarity', 'imageUrl', 'stats', 'enhancements', 'droppedBy', 'setBonuses', 'setId', 'setName'], json: ['stats', 'enhancements', 'droppedBy', 'setBonuses'] },
     creature: { table: 'creatures', list: ['id', 'name', 'imageUrl'], detail: ['id', 'name', 'imageUrl', 'description', 'stats', 'enhancements', 'droppedItems'], json: ['stats', 'enhancements', 'droppedItems'] },
     realm: { table: 'realms', list: ['id', 'name', 'min_level', 'master_realm_id'], detail: ['id', 'name', 'min_level', 'master_realm_id', 'shops', 'connections', 'map_objects'], json: ['shops', 'connections', 'map_objects'] },
-    master_realm: { table: 'master_realms', list: ['id', 'name'], detail: ['id', 'name', 'connected_realms'], json: ['connected_realms'] },
+    master_realm: { table: 'master_realms', list: ['id', 'name'], detail: ['id', 'name', 'min_level', 'imageUrl', 'connected_realms'], json: ['connected_realms'] },
     relic: { table: 'relics', list: ['id', 'name', 'realm_id'], detail: ['id', 'name', 'realm_id', 'details'], json: ['details'], natural: true },
     quest: { table: 'quests', list: ['id', 'name', 'realm_id', 'min_level'], detail: ['id', 'name', 'realm_id', 'min_level', 'details'], json: ['details'], natural: true },
 };
@@ -30,6 +30,12 @@ const MAX_JSON_OUT = 16 * 1024;
 const COMPLETENESS = ['complete', 'incomplete'];
 
 const invalid = (message, field) => new CatalogError('invalid', message, field ? { field } : {});
+function validateFieldStates(kind, states = {}) {
+    const allowed = manualPolicyFields(kind);
+    if (!states || typeof states !== 'object' || Array.isArray(states)
+        || Object.entries(states).some(([path, state]) => !allowed.includes(path) || !['do_not_check', 'incomplete', 'complete'].includes(state))) throw invalid('Invalid field update labels.', 'fieldStates');
+    return states;
+}
 const like = v => `%${v.replace(/[!%_]/g, m => `!${m}`)}%`;   // with ESCAPE '!'
 
 function cell(col, value, spec) {
@@ -78,19 +84,55 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
         return { ...state, due, overdue, display, nextCheckAt: last === null ? null : new Date(last + policy.checkIntervalMs).toISOString() };
     }
 
+    async function editingKey(kind, key) {
+        if (SERVING[kind].natural && /^[1-9]\d{0,7}$/.test(key)) {
+            const guide = await guideStore.getIdState(kind, Number(key));
+            return guide?.entityKey ? store.resolveEntityKey(kind, guide.entityKey) : `manual:${key}`;
+        }
+        return key;
+    }
+
     return {
         /** Guide-compatible fields for the manual form.
          * @returns {object} Allowed field names per kind.
          */
         manualFields: manualRecordFields,
 
+        /** Gets existing catalog values for the structured editor.
+         * @param {string} kind Catalog kind.
+         * @param {string} key Catalog key.
+         * @returns {Promise<object>} Editable fields and conflict token.
+         */
+        async getEditingRecord(kind, key) {
+            if (!BROWSE_KINDS.includes(kind)) throw invalid('Unknown kind.', 'kind');
+            key = await editingKey(kind, key);
+            return { key, ...await store.getEditingRecord(kind, key) };
+        },
+
+        /** Validates and saves an owner patch while preserving omitted fields.
+         * @param {string} kind Catalog kind.
+         * @param {string} key Catalog key.
+         * @param {{record: object, version: string}} input Patch and conflict token.
+         * @returns {Promise<object>} Saved run and identity.
+         */
+        async editEntity(kind, key, { record, version, fieldStates = {} }) {
+            if (!BROWSE_KINDS.includes(kind) || !validEditRecord(kind, record)) throw invalid('Invalid catalog fields.', 'record');
+            if (typeof version !== 'string' || !/^[a-f0-9]{64}$/.test(version)) throw invalid('Reopen the entry before saving.', 'version');
+            key = await editingKey(kind, key);
+            const current = await store.getEditingRecord(kind, key);
+            if (record.id !== undefined && record.id !== current.record.id) throw invalid('The record ID cannot change.', 'id');
+            validateFieldStates(kind, fieldStates);
+            return store.editEntry({ kind, key, record, version, fieldStates, policyPaths: manualPolicyFields(kind) });
+        },
+
         /** Adds an ID-only or partial record, provisionally, for future Guide completion.
          * @param {{kind: string, record: object}} input Manual form data.
          * @returns {Promise<object>} Created run and entity key.
          */
-        async addManualEntry({ kind, record }) {
+        async addManualEntry({ kind, record, fieldStates = {} }) {
             if (!BROWSE_KINDS.includes(kind)) throw invalid('Unknown kind.', 'kind');
             if (!validManualRecord(kind, record)) throw invalid('Use a valid Guide ID and valid optional Guide fields.', 'record');
+            validateFieldStates(kind, fieldStates);
             // Natural identities remain in the manual queue until a validated Guide detail supplies
             // the authoritative realm/name key. All submitted fields are kept in that queue.
             const mapped = SERVING[kind].natural ? { observations: [], references: [], relations: [] } : mapGuideRecord(kind, record);
@@ -101,7 +143,7 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
                 if (!existing.length) observations.push({ kind: ref.kind, payload: { id: ref.id, ...(ref.name ? { name: ref.name } : {}) } });
             }
             observations.push(...mapped.relations.map(payload => ({ kind: 'relation', payload })));
-            return store.createManualEntry({ kind, record, observations, references: mapped.references });
+            return store.createManualEntry({ kind, record, observations, references: mapped.references, fieldStates, policyPaths: manualPolicyFields(kind) });
         },
         /** Schedules index discovery through the existing Guide worker; completed details stay fulfilled.
          * @returns {Promise<void>} Rejects when Guide discovery is unavailable or paused.
