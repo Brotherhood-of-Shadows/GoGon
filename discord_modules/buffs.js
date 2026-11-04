@@ -172,13 +172,10 @@ export async function quickBuff(target, skillIds) {
     const $report = $('#quickbuff-report');
     if (!$report.length) {
         const looksLikeLogin = /name=["']?username["']?|id=["']?login["']?/i.test(html);
-        results.details.push({ status: 'no-report-found', hint: looksLikeLogin ? 'Session expired' : 'Markup changed' });
-        
-        // --- ADDED FOR DEBUGGING ---
-        console.log('[SWS_DEBUG] quickBuff: Could not find #quickbuff-report. Full HTML response:');
-        console.log(html);
-        // -------------------------
-
+        const hint = looksLikeLogin ? 'Session expired' : 'Markup changed';
+        results.details.push({ status: 'no-report-found', hint });
+        // RULE-002: the game's page can name characters, so only its shape is logged, never its HTML.
+        console.warn(`[GoGon] quickBuff: no #quickbuff-report in the game response (${hint}; ${html.length} characters).`);
         return results;
     }
     const messages = $report.find('p:not(.back)').map((_, el) => $(el).text().trim()).get();
@@ -198,12 +195,9 @@ export async function quickBuff(target, skillIds) {
         }
     }
 
-    // --- ADDED FOR DEBUGGING ---
     if (results.success.length === 0 && results.failed.length === 0 && results.blocked.length === 0) {
-        console.log('[SWS_DEBUG] quickBuff: Parsed report but found no known messages. Full HTML response:');
-        console.log(html);
+        console.warn(`[GoGon] quickBuff: the report had ${messages.length} message(s) and none matched a known result.`);
     }
-    // -------------------------
 
     results.success = [...new Set(results.success)];
     results.failed = [...new Set(results.failed)];

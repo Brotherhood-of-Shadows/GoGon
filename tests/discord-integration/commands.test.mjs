@@ -14,6 +14,7 @@ let buffsResult;          // what getBuffs() resolves to
 let availableSkills = []; // skill ids the caster can cast
 let inventoryItems = [];  // items in the "Main" inventory folder
 const casts = [];         // quickbuff POSTs: { target, ids }
+let quickbuffPage = null; // overrides the quickbuff response HTML when set
 const usedItems = [];     // inventory ids passed to useitem
 
 const json = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
@@ -26,7 +27,7 @@ mock.module(new URL('../../utils.js', import.meta.url).href, {
                 const ids = options.body.getAll('skills[]').map(Number);
                 casts.push({ target: options.body.get('targetPlayers'), ids });
                 const lines = ids.map(id => `<p>Skill '${id}' level 1 was activated on 'x'.</p>`).join('');
-                return { ok: true, status: 200, text: async () => `<div id="quickbuff-report">${lines}</div>` };
+                return { ok: true, status: 200, text: async () => quickbuffPage ?? `<div id="quickbuff-report">${lines}</div>` };
             }
             if (url === apiEndpoints.player.availableBuffs) {
                 return json({ s: true, r: { skills: availableSkills.map(id => ({ id, points: 1 })) } });
@@ -69,6 +70,7 @@ beforeEach(() => {
     availableSkills = [];
     inventoryItems = [];
     casts.length = usedItems.length = 0;
+    quickbuffPage = null;
 });
 
 // --- getBuffs() return shape (DISC-TASK-001/002) --------------------------------------------------
@@ -175,4 +177,23 @@ test('REC-TASK-004: the backup "bloodthirst" and "deathwish" names resolve witho
     assert.equal(ID_TO_NAME[34], 'Death Wish');
     assert.equal(getBuffNameById(4), 'Blood Thirst');
     assert.equal(getBuffNameById(34), 'Death Wish');
+});
+
+// --- RULE-002: game pages never reach the logs -----------------------------------------------------
+test('RULE-002: quickBuff logs only the shape of an unreadable game response, never its HTML', async () => {
+    const lines = [];
+    const capture = (...args) => lines.push(args.join(' '));
+    const spies = ['log', 'warn', 'error'].map(level => mock.method(console, level, capture));
+    try {
+        quickbuffPage = '<html><form id="login"><input name="username"></form><p>SecretCharacter</p></html>';
+        const missing = await buffs.quickBuff('SecretCharacter', [13]);
+        assert.deepEqual(missing.details, [{ status: 'no-report-found', hint: 'Session expired' }]);
+        quickbuffPage = '<div id="quickbuff-report"><p>SecretCharacter did something new.</p></div>';
+        const unknown = await buffs.quickBuff('SecretCharacter', [13]);
+        assert.deepEqual([unknown.success, unknown.failed, unknown.blocked], [[], [], []]);
+    } finally { spies.forEach(spy => spy.mock.restore()); }
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /no #quickbuff-report .*Session expired; \d+ characters/);
+    assert.match(lines[1], /report had 1 message\(s\) and none matched/);
+    assert.doesNotMatch(lines.join('\n'), /SecretCharacter|<html|<p>/);
 });

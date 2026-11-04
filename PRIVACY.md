@@ -1,6 +1,6 @@
 # GoGon Privacy Policy
 
-Effective date: 3 November 2026
+Effective date: 3 November 2026 · Last updated: 4 November 2026
 
 This policy explains how **Brotherhood of Shadows** (<https://github.com/Brotherhood-of-Shadows>),
 "we" or "us", processes personal data when operating GoGon: the Discord bot, its commands and menus,
@@ -31,7 +31,7 @@ signed-in administrators.
 | Notifications waiting to be sent to Discord | Until sent, then deleted 7 days after delivery; failed notifications stay until an administrator retries or discards them |
 | Lists of already-posted game events | Event identifiers only, the most recent 100 to 500 per notification type |
 | Messages GoGon has posted in Discord | Kept by Discord until deleted by the server's moderators or by us |
-| Application logs | Rotated automatically (at most three files of 10 MB each). Logs record operational events and errors; when a buff result cannot be read, a log may contain the game's response, which can include character names |
+| Application logs | Rotated automatically (at most three files of 10 MB each). Logs record operational events and errors, not the content of game pages or Discord messages |
 | Game-account credentials | Until an administrator removes the account profile; stored encrypted (AES-256-GCM) |
 | Operator audit log | Until an administrator deletes it |
 
