@@ -170,7 +170,9 @@ matches. Replies are visible only to the person who asked: menus open related en
 creatures, quests, relics, stairways, set pieces) in the same message, quests have stage buttons, and
 **Share** posts the whole card to the channel without mentions: its menus and quest stage buttons
 stay, so anyone can page through every stage or follow a link. Using them on the shared post opens a
-private card for that person; the shared post itself never changes. Entries the catalog marks
+private card for that person; the shared post itself never changes. A quest stage is laid out as
+Requirements, Story and Reward; the parts are recovered from the stored stage text at display time,
+so no re-scan is needed. Entries the catalog marks
 incomplete carry a badge with the same reason wording as the Catalog tab. Menus keep working after a
 restart. A database outage produces an ephemeral "Guide data is unavailable right now" and one
 `[guide]` error line; slow or failed autocomplete logs a `[guide]` warning without the typed text.

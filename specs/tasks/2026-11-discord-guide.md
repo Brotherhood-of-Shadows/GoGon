@@ -64,6 +64,10 @@ Depends on `2026-11-guide-catalog-reader.md` (`createCatalogReader`).
   without the button. A menu or stage button used on the shared post replies to that member with an
   ephemeral card (which has Share again) and never edits the shared post. A component counts as
   "on the requester's card" only when its message carries the Ephemeral flag.
+- AC-5a: Given a quest stage whose stored text has the parser's shape (`Label: value. … — story`),
+  the card shows the stage heading with a progress line, then **Requirements** (one line per
+  requirement), **Story** as a block quote shortened before the reward if needed, and **Reward**
+  (the closing "You receive/Gain N XP…" sentence without its verb). Other stage text is shown as is.
 - AC-6: Given a typed name not chosen from autocomplete, the bot resolves an exact case-insensitive
   match of that kind; if several match it shows an ephemeral picker; if none match it replies
   ephemerally "No <kind> named …" with up to 5 suggestions. Given a menu or button for an entry that

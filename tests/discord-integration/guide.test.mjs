@@ -4,7 +4,10 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { MessageFlags, MessageFlagsBitField, ComponentType } from 'discord.js';
-import { createGuideHandlers, renderCard, parseGuideCustomId, MESSAGES } from '../../discord_modules/guide.js';
+import { readFileSync } from 'node:fs';
+import { parseHTML } from 'linkedom';
+import { createGuideHandlers, renderCard, parseGuideCustomId, splitStageText, MESSAGES } from '../../discord_modules/guide.js';
+import { parseQuestDetail } from '../../catalog/guideParsers.js';
 import { createCatalogReader } from '../../catalog/catalogReader.js';
 import { freshClient, closeClients } from '../helpers/db-client.mjs';
 
@@ -86,16 +89,54 @@ test('cards render per kind with an incomplete badge, relation menus, stage butt
     assert.match(realm.embeds[0].fields.find(f => f.name === 'Creatures (140)').value, /\+115 more$/);
 
     const stage1 = renderCard(CARDS.quest);
-    assert.match(stage1.embeds[0].description, /\*\*Stage 1 of 2\*\*\nMinimum Level: 1\. Kill rats\./);
+    assert.match(stage1.embeds[0].description, /\*\*📜 Stage 1 of 2\*\*  ●○\n\nMinimum Level: 1\. Kill rats\./, 'text without the stored stage shape is shown as it is');
     assert.deepEqual(stage1.components.at(-1).components.map(b => [b.custom_id, b.disabled ?? false]), [
         ['guide:stage:51:1', true], ['guide:stage:51:2', false], ['guide:open:realm:9', false], ['guide:share:quest:51:1', false]]);
-    assert.match(renderCard(CARDS.quest, { stage: 2 }).embeds[0].description, /Stage 2 of 2\*\*\nReport back\./);
+    assert.match(renderCard(CARDS.quest, { stage: 2 }).embeds[0].description, /Stage 2 of 2\*\*  ●●\n\nReport back\./);
 
     const shared = renderCard(CARDS.item, { shared: true });
     assert.deepEqual(customIds(shared), ['guide:go:0'], 'shared cards keep their menus but not Share');
     assert.match(shared.embeds[0].footer.text, /shared from \/guide$/);
     assert.deepEqual(customIds(renderCard(CARDS.quest, { stage: 2, shared: true })), ['guide:stage:51:1', 'guide:stage:51:2', 'guide:open:realm:9']);
     assert.deepEqual(renderCard({ ...CARDS.quest, stages: [], realm: null }, { shared: true }).components, [], 'no empty button row');
+});
+
+test('quest stages show requirements, story and reward as separate sections', () => {
+    const text = 'Minimum Level: 5501. Location: Lackter Forest (Copse) (15, 14). Required Item: None. Required Kills: None — '
+        + 'You return to the farm and see Mikhail. "Greetings [USERNAME]!" He beckons you towards the house. You receive 163,379,702 XP';
+    assert.deepEqual(splitStageText(text), {
+        requirements: [
+            { label: 'Minimum Level', value: '5501' },
+            { label: 'Location', value: 'Lackter Forest (Copse) (15, 14)' },
+            { label: 'Required Item', value: 'None' },
+            { label: 'Required Kills', value: 'None' },
+        ],
+        story: 'You return to the farm and see Mikhail. "Greetings [USERNAME]!" He beckons you towards the house.',
+        reward: '163,379,702 XP',
+    });
+    const quest = { ...CARDS.quest, stages: [CARDS.quest.stages[0], { heading: 'Stage 2', text }, CARDS.quest.stages[1]] };
+    const description = renderCard(quest, { stage: 2 }).embeds[0].description;
+    assert.equal(description.split('\n\n').slice(1).join('\n\n'), [
+        '**📜 Stage 2 of 3**  ●●○',
+        '__**Requirements**__\n🔰 **Minimum level:** 5,501\n📍 **Location:** Lackter Forest \\(Copse\\) \\(15, 14\\)\n📦 **Required item:** *None*\n⚔️ **Required kills:** *None*',
+        '__**Story**__\n> You return to the farm and see Mikhail. "Greetings [USERNAME]!" He beckons you towards the house.',
+        '__**Reward**__\n🏆 **163,379,702 XP**',
+    ].join('\n\n').replace(/\\\(/g, '(').replace(/\\\)/g, ')'));
+    assert.equal(splitStageText('Required Kills: 10 x Bandit — Slay them. Gain 200 XP.').reward, '200 XP');
+    assert.equal(splitStageText('Location: Mountain Path (2, 6) — The guard nods.').reward, null, 'no reward sentence, no reward section');
+    assert.equal(splitStageText('Kill rats. Then report back.'), null);
+});
+
+test('every stage of the live quest page splits into requirements, story and reward', () => {
+    const html = readFileSync(new URL('../catalog-sync/fixtures/guide-quest-live.html', import.meta.url), 'utf8');
+    const { sections } = parseQuestDetail(parseHTML(html).document, 160);
+    for (const section of sections) {
+        const parts = splitStageText(section.text);
+        assert.deepEqual(parts?.requirements.map(r => r.label), ['Minimum Level', 'Location', 'Required Item', 'Required Kills'], section.heading);
+        assert.ok(parts.story.length > 20, section.heading);
+        assert.match(parts.reward ?? '', /^\d[\d,]* XP\b/, `${section.heading}: ${section.text.slice(-60)}`);
+    }
+    assert.equal(splitStageText(sections[6].text).reward, "10 XP + 'Stinking Rat Brew'", 'item rewards stay with the XP');
 });
 
 test('oversized cards stay within every Discord limit', () => {
@@ -106,7 +147,9 @@ test('oversized cards stay within every Discord limit', () => {
         relations: { droppedBy: relation('creature', 900, Array.from({ length: 25 }, (_, n) => `${'C'.repeat(150)}${n}`)) },
     };
     const quest = { ...CARDS.quest, stages: [{ heading: 'Stage 1', text: 'z'.repeat(8192) }] };
-    for (const body of [renderCard(huge), renderCard(quest)]) {
+    const longStory = { ...CARDS.quest, stages: [{ heading: 'Stage 1', text: `Minimum Level: 1 — ${'A long tale. '.repeat(600)}You gain 10 XP` }] };
+    assert.match(renderCard(longStory).embeds[0].description, /…\n\n__\*\*Reward\*\*__\n🏆 \*\*10 XP\*\*$/, 'a long story is shortened, not the reward');
+    for (const body of [renderCard(huge), renderCard(quest), renderCard(longStory)]) {
         const [embed] = body.embeds;
         const total = embed.title.length + (embed.description?.length ?? 0) + embed.footer.text.length + (embed.fields ?? []).reduce((n, f) => n + f.name.length + f.value.length, 0);
         assert.ok(embed.title.length <= 256 && (embed.description?.length ?? 0) <= 4096 && total <= 6000, `total ${total}`);

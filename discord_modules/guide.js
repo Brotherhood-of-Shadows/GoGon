@@ -58,6 +58,62 @@ function badge(card) {
     return `⚠️ **Incomplete**${reasons.length ? ` — ${reasons.join('; ')}` : ''}`;
 }
 
+// --- quest stages -----------------------------------------------------------------------------------
+// The Guide parser stores a stage as "Label: value. Label: value — story", and the story usually ends
+// with its reward ("You receive 163,379,702 XP", "Gain 10 XP."). Stages are split back into those
+// parts for display; text that does not have this shape is shown as it is.
+const REQUIREMENT_STYLE = [
+    [/^location$/i, '📍', 'Location'],
+    [/^minimum level$/i, '🔰', 'Minimum level'],
+    [/^required items?$/i, '📦', 'Required item'],
+    [/^required kills$/i, '⚔️', 'Required kills'],
+];
+const REQUIREMENT = /^([A-Z][A-Za-z ]{0,30}):\s*(.*)$/;
+const REWARD = /(?:\byou\s+(?:have\s+)?)?\b(?:gain(?:ed|s)?|receive[ds]?|earn(?:ed|s)?|are\s+rewarded\s+with)\s+\d[\d,]*\b[^.!?]{0,120}[.!]?\s*$/i;
+const REWARD_VERB = /^(?:you\s+(?:have\s+)?)?(?:gain(?:ed|s)?|receive[ds]?|earn(?:ed|s)?|are\s+rewarded\s+with)\s+/i;
+const MAX_PROGRESS_DOTS = 20;
+const MAX_STORY = 3200; // leaves room in the 4096-character description for the rest of the stage
+
+/** Splits stored stage text into requirements, story and reward, or returns null for other text.
+ * @param {string} text Stored stage text.
+ * @returns {{requirements: {label: string, value: string}[], story: string, reward: string|null}|null} Stage parts.
+ */
+export function splitStageText(text) {
+    const value = String(text ?? '').trim();
+    const cut = value.indexOf(' — ');
+    const head = cut >= 0 ? value.slice(0, cut) : value;
+    const requirements = head.split(/\.\s+(?=[A-Z][A-Za-z ]{0,30}:)/).map(part => part.match(REQUIREMENT));
+    if (!head || requirements.some(match => !match || /\.\s+\S/.test(match[2]))) return null;
+    let story = cut >= 0 ? value.slice(cut + 3).trim() : '';
+    const reward = story.match(REWARD);
+    if (reward && reward.index > 0) story = story.slice(0, reward.index).trim();
+    return {
+        requirements: requirements.map(([, label, item]) => ({ label: label.trim(), value: item.replace(/\.$/, '').trim() })),
+        story,
+        reward: reward && reward.index > 0 ? reward[0].trim().replace(/[.!]$/, '').replace(REWARD_VERB, '') : null,
+    };
+}
+
+function requirementLine({ label, value }) {
+    const [, icon, name] = REQUIREMENT_STYLE.find(([pattern]) => pattern.test(label)) ?? [null, '▫️', label];
+    const shown = /^minimum level$/i.test(label) && /^\d{4,}$/.test(value) ? Number(value).toLocaleString('en-US') : value;
+    return `${icon} **${md(name)}:** ${/^none$/i.test(shown) ? '*None*' : md(shown || '—')}`;
+}
+
+function stageText(stage, number, count) {
+    const progress = count > 1 && count <= MAX_PROGRESS_DOTS ? `  ${'●'.repeat(number)}${'○'.repeat(count - number)}` : '';
+    const heading = `**📜 ${md(stage.heading)} of ${count}**${progress}`;
+    const parts = splitStageText(stage.text);
+    if (!parts) return `${heading}\n\n${md(stage.text)}`;
+    const quote = text => md(text).split('\n').map(line => `> ${line}`).join('\n');
+    return [
+        heading,
+        `__**Requirements**__\n${parts.requirements.map(requirementLine).join('\n')}`,
+        parts.story ? `__**Story**__\n${quote(truncate(parts.story, MAX_STORY))}` : null,
+        parts.reward ? `__**Reward**__\n🏆 **${md(parts.reward)}**` : null,
+    ].filter(Boolean).join('\n\n');
+}
+
 function kindBody(card, stage) {
     const fields = [];
     const add = (name, value, inline = false) => { if (value) fields.push({ name: truncate(name, 256), value: truncate(value, 1024), inline }); };
@@ -101,7 +157,7 @@ function kindBody(card, stage) {
     } else if (card.kind === 'quest') {
         subtitle = ['Quest', card.realm?.name, card.minLevel != null ? `Level ${card.minLevel}` : null].filter(Boolean).map(md).join(' • ');
         const current = card.stages[stage - 1];
-        text = current ? `**${md(current.heading)} of ${card.stages.length}**\n${md(current.text)}` : 'No stages recorded yet.';
+        text = current ? stageText(current, stage, card.stages.length) : 'No stages recorded yet.';
     }
     return { subtitle, text, fields };
 }
