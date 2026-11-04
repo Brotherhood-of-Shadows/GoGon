@@ -154,11 +154,14 @@ test('compact recipe announcement shows Min Level once and never the bot account
     assert.match(stash.fields.find(field => field.name === 'Item details').value, /^Open this fragment stash[\s\S]*\nCommon: 10 - 15\n[\s\S]*Crystalline: 0 - 1$/);
 });
 
-test('compact detail tables stay one level deep, outside the header, and keep a numeric Min Level', () => {
+test('compact detail tables stay at most two levels deep, outside the header, and keep a numeric Min Level', () => {
     const recipe = compact('recipe');
     const inner = '<table><tr><td>x</td></tr></table>';
+    const deep = `<table><tr><td>${inner}</td></tr></table>`;
+    assert.equal(parseItemTooltip(recipe.replace('<font color="#999999">Min Level:</font>', `<font color="#999999">Min Level:</font>${inner}`), 17071).record.name,
+        'Recipe of Twangy’s Axe', 'a table inside the detail table is allowed, as in potion buff lists');
     for (const body of [
-        recipe.replace('<font color="#999999">Min Level:</font>', `<font color="#999999">Min Level:</font>${inner}`),
+        recipe.replace('<font color="#999999">Min Level:</font>', `<font color="#999999">Min Level:</font>${deep}`),
         recipe.replace('<div>Recipe - Epic</div>', `<div>Recipe - Epic</div>${inner}`),
         recipe.replace('</tbody></table></body>', `${`<tr><td>${inner}</td></tr>`.repeat(8)}</tbody></table></body>`),
     ]) assert.throws(() => parseItemTooltip(body, 17071), error => error.code === 'compact_layout_invalid');
@@ -166,27 +169,39 @@ test('compact detail tables stay one level deep, outside the header, and keep a 
     assert.throws(() => parseItemTooltip(`${recipe}${recipe}`, 17071), error => error.code === 'compact_layout_invalid');
 });
 
-const comparison = readFileSync('tests/catalog-sync/fixtures/item-tooltip-comparison.html', 'utf8');
-
-test('equipped-item comparison yields the requested item only and never stores the equipped one', () => {
-    assert.deepEqual(parseItemTooltip(comparison, 17070), parseItemTooltip(epic, 17070));
-    assert.doesNotMatch(JSON.stringify(parseItemTooltip(comparison, 17070)), /Iklilian|Excellent|15210|148/);
-    const [requested, equipped] = comparison.match(/<table width="250"[\s\S]*?<\/table>/g);
-    const sameCell = `<html><body><table><tr><td>${requested}<br>${equipped}</td></tr></table></body></html>`;
-    assert.equal(parseItemTooltip(sameCell, 17070).record.name, 'Twangy’s Axe');
-    const labelled = comparison.replace(`<td valign="top">${equipped}`, `<td valign="top"><b>Currently Equipped</b>${equipped}`);
-    assert.equal(parseItemTooltip(labelled, 17070).record.name, 'Twangy’s Axe');
+test('owner Knack potion reads its nested buff table, Min Level and note', () => {
+    const { record } = parseItemTooltip(compact('potion'), 17076);
+    assert.deepEqual(record, { id: 17076, name: 'Knack', imageUrl: 'https://cdn2.fallensword.com/items/17076.gif', rarity: 'Unique',
+        stats: { type: 'Potion', level: 2300 }, details: { tooltipRows: ['Activates the following buff(s):', 'Skill | Level | Duration',
+            'Summon Shield Imp | 500 | 120m', 'Side Step | 500 | 120m', 'Golden Shield | 350 | 120m', 'Min Level: 2300',
+            'Note: If you have a skill of a higher level active, the skill given by the potion will be ignored.'],
+        nameColor: '#CC00CC', typeDetails: ['Bound (Non-Tradable)'] } });
+    const embed = itemReleaseMessage(record, '2026-11-03T00:00:00.000Z').embeds[0];
+    assert.deepEqual(embed.fields.map(field => field.name), ['Min level', 'Item details']);
+    assert.doesNotMatch(embed.fields[1].value, /Min Level/);
 });
 
-test('only the exact two-cell comparison wrapper is accepted; other multi-item documents stay ambiguous', () => {
-    const [requested, equipped] = comparison.match(/<table width="250"[\s\S]*?<\/table>/g);
-    const cell = table => `<td>${table}</td>`;
+const comparison = readFileSync('tests/catalog-sync/fixtures/item-tooltip-comparison.html', 'utf8');
+const [requestedTip, equippedTip] = comparison.match(/<table width="250" class="item-tip"[\s\S]*?<\/table>/g);
+const compare = (first, second) => `<html><body><table><tbody><tr><td valign="top">${first}</td><td class="item-tip-compare-gap"></td><td valign="top">${second}</td></tr></tbody></table></body></html>`;
+const heading = text => `<strong class="item-tip-heading">${text}</strong><br>`;
+
+test('owner equipment comparison yields only the "Item Details" item, never the equipped one', () => {
+    assert.deepEqual(parseItemTooltip(comparison, 17070), parseItemTooltip(epic, 17070));
+    assert.doesNotMatch(JSON.stringify(parseItemTooltip(comparison, 17070)), /Flamedeer|Perfect|Reinforced Armor|Upgrade Level|4500/);
+    const swapped = compare(heading('Equipped Details') + equippedTip, heading('Item Details') + requestedTip);
+    assert.equal(parseItemTooltip(swapped, 17070).record.name, 'Twangy’s Axe', 'selected by heading, not position');
+});
+
+test('multi-item documents without the exact Item/Equipped Details comparison stay ambiguous', () => {
+    const third = heading('Equipped Details') + equippedTip.replace('Greater Flamedeer Horns', 'Third');
     for (const body of [
-        `<html><body><table><tr>${cell(requested)}${cell(equipped)}${cell(equipped.replace("Iklilian's", 'Third'))}</tr></table></body></html>`,
-        `<html><body><table><tr>${cell(requested)}</tr></table><table><tr>${cell(equipped)}</tr></table></body></html>`,
-        `<html><body><p>Market listing</p><table><tr>${cell(requested)}${cell(equipped)}</tr></table></body></html>`,
-        `<html><body><table><tr>${cell(requested)}${cell(equipped)}<td><table><tr><td>Other</td></tr></table></td></tr></table></body></html>`,
-        `<html><body><table><tr>${cell(requested)}${cell(equipped)}<td>${'Long page text '.repeat(10)}</td></tr></table></body></html>`,
-        `<html><body><div>${requested}${equipped}</div></body></html>`,
-    ]) assert.throws(() => parseItemTooltip(body, 17070), error => error.code === 'multiple_item_tables', body.slice(0, 80));
+        compare(requestedTip, equippedTip),
+        compare(heading('Item Details') + requestedTip, heading('Item Details') + equippedTip),
+        compare(heading('Item Details') + requestedTip, heading('Equipped Details') + equippedTip).replace('</tr></tbody></table></body>', `<td>${third}</td></tr></tbody></table></body>`),
+        `<html><body><p>Market listing</p>${compare(heading('Item Details') + requestedTip, heading('Equipped Details') + equippedTip).slice('<html><body>'.length)}`,
+        compare(heading('Item Details') + requestedTip, heading('Equipped Details') + equippedTip).replace('<td class="item-tip-compare-gap"></td>', '<td><table><tr><td>Other</td></tr></table></td>'),
+        compare(heading('Item Details') + requestedTip, heading('Equipped Details') + equippedTip).replace('<td class="item-tip-compare-gap"></td>', `<td>${'Long page text '.repeat(10)}</td>`),
+        `<html><body><div>${heading('Item Details')}${requestedTip}${heading('Equipped Details')}${equippedTip}</div></body></html>`,
+    ]) assert.throws(() => parseItemTooltip(body, 17070), error => error.code === 'multiple_item_tables', body.slice(0, 120));
 });

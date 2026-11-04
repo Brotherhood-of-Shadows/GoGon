@@ -172,7 +172,7 @@ test('failures retain exact ID/phase/parser diagnostics across restart without p
     await assert.rejects(store.recordRequest(state.scanId, { ...state.lastRequest, body: 'must never persist' }), error => error.code === 'invalid');
 });
 
-test('live 17070 equipped-item comparison is discovered and announced as the requested item', async () => {
+test('owner 17070 equipment comparison is discovered and announced as the requested item', async () => {
     const { env, db, store, worker } = await setup();
     const comparisonSample = readFileSync('tests/catalog-sync/fixtures/item-tooltip-comparison.html', 'utf8');
     env.intercept = id => id === 17069 ? response(questSample) : id === 17070 ? response(comparisonSample) : null;
@@ -183,7 +183,7 @@ test('live 17070 equipped-item comparison is discovered and announced as the req
     assert.equal(item.name, 'Twangy’s Axe');
     const [outbox] = await db.query('SELECT * FROM notification_outbox');
     assert.match(JSON.stringify(outbox), /Twangy’s Axe/);
-    assert.doesNotMatch(JSON.stringify(outbox) + JSON.stringify(await store.state()), /Iklilian/);
+    assert.doesNotMatch(JSON.stringify(outbox) + JSON.stringify(await store.state()), /Flamedeer/);
 });
 
 test('ambiguous tooltip tables persist their structural summary and retain the body only for the owner', async () => {

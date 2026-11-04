@@ -46,22 +46,25 @@ function singleItemTable($) {
     throw new ItemTooltipError('Multiple item tables.', 'multiple_item_tables', describeTables($, tables));
 }
 
-// When the bot's character has an item equipped in the requested item's slot, the game answers the
-// same fetchitem URL with a comparison: one wrapper table whose cells hold the requested item
-// first and the equipped item second (live 17070, 2026-11-03: Twangy’s Axe, then the account's
-// Iklilian's Starweaver). Only that exact shape is accepted; the equipped item is account state
-// and is ignored. Anything else stays ambiguous and is rejected with its structure.
+// With the game's equipment comparison preference on, a tooltip for one of the nine equippable
+// item types is wrapped in one table: an "Item Details" heading with the requested item, an
+// item-tip-compare-gap cell, then "Equipped Details" with the account's equipped item of that
+// slot (owner capture, 17070, 2026-11-03). Other item types are never compared. Only this exact
+// shape is accepted; the equipped item is account state and is ignored.
 function comparisonRequestedTable($, tables) {
     const content = $('body').children().not('script, link, style');
     if (tables.length !== 2 || content.length !== 1 || !content.is('table')) return null;
     const wrapper = content[0];
+    const heading = table => clean($(table).prevAll('.item-tip-heading').first().text()).toLowerCase();
+    const requested = tables.toArray().find(table => heading(table) === 'item details');
+    const equipped = tables.toArray().find(table => heading(table) === 'equipped details');
     const ownTables = content.find('table').toArray().filter(table => !$(table).parents('table.item-tip').length);
     const inWrapperCells = tables.toArray().every(table => $(table).parent().is('td') && $(table).parent().closest('table')[0] === wrapper);
-    if (!inWrapperCells || ownTables.length !== 2) return null;
+    if (!requested || !equipped || !inWrapperCells || ownTables.length !== 2) return null;
     const outside = content.clone();
     outside.find('table.item-tip').remove();
     if (clean(outside.text()).length > 64) return null;
-    return tables.first();
+    return $(requested);
 }
 
 function numeric(value) {
@@ -76,29 +79,38 @@ function numeric(value) {
 const ACCOUNT_STATE_LABELS = /^recipe known$/i;
 const MAX_COMPACT_DETAIL_TABLES = 8;
 
-// Visible lines of one cell: paragraphs/blocks become separate lines; a line break inside one
-// joins its parts ("Egg (Rare Potion): Conserve [300, 60m]") so names keep their descriptions.
+// Visible lines of one cell: paragraphs/blocks and line breaks become separate lines, except that
+// a break inside a paragraph joins its parts ("Egg (Rare Potion): Conserve [300, 60m]") so
+// container choices keep their descriptions.
 function cellLines($, cell) {
     const node = $(cell).clone();
-    node.find('br').replaceWith(': ');
+    node.find('p br').replaceWith(': ');
+    node.find('br').replaceWith('\n');
     node.find('p, div, li').each((_, element) => { $(element).prepend('\n').append('\n'); });
     return node.text().split('\n').map(clean).filter(Boolean);
 }
 
-// A two-cell "Label:" / value row stays one entry; any other row lists each cell's lines.
+// A two-cell "Label:" / value row stays one entry; a row of three or more cells (a buff table's
+// skill, level and duration) is one " | "-joined entry; any other row lists each cell's lines.
+// Nested tables are read as their own rows, so their text is excluded from the enclosing cell.
 function rowEntries($, row) {
-    const cells = $(row).children('td').toArray().map(cell => cellLines($, cell)).filter(lines => lines.length);
+    const cells = $(row).children('td').toArray().map(cell => {
+        const own = $(cell).clone();
+        own.find('table').remove();
+        return cellLines($, own);
+    }).filter(lines => lines.length);
     if (cells.length === 2 && cells[0].length === 1 && /:$/.test(cells[0][0])) {
         const label = cells[0][0].replace(/:$/, '').trim();
         const value = cells[1].join(' ');
         return [{ text: `${label}: ${value}`, label, value }];
     }
+    if (cells.length >= 3) return [{ text: cells.map(lines => lines.join(' ')).join(' | ') }];
     return cells.flat().map(text => ({ text }));
 }
 
 // Quest, resource, recipe, component, container and stash tooltips use the compact legacy table
 // rather than the equipment item-tip classes, with details either in its own rows or in detail
-// tables one level deep. Require one isolated table, a named font header and a type row so full
+// tables up to two levels deep (a potion's buff list sits inside its detail table). Require one isolated table, a named font header and a type row so full
 // login/error pages cannot be mistaken for items. Keep descriptive rows; only Min Level becomes a
 // stat, and no equipment stats or rarity are invented.
 function compactTooltip($, id) {
@@ -107,7 +119,7 @@ function compactTooltip($, id) {
     const roots = content;
     const headerRow = roots.children('tbody').children('tr').first();
     const detailTables = roots.find('table');
-    if (content.length !== 1 || !content.is('table') || headerRow.find('table').length || detailTables.find('table').length || detailTables.length > MAX_COMPACT_DETAIL_TABLES)
+    if (content.length !== 1 || !content.is('table') || headerRow.find('table').length || detailTables.filter((_, table) => $(table).parents('table').length > 2).length || detailTables.length > MAX_COMPACT_DETAIL_TABLES)
         throw new ItemTooltipError('Ambiguous compact item document.', 'compact_layout_invalid');
     const header = headerRow.children('td');
     const blocks = header.children('center').children('div');
@@ -116,7 +128,7 @@ function compactTooltip($, id) {
     const typeText = clean(blocks.eq(1).text());
     const { type, rarity } = parseItemType(typeText);
     if (header.length !== 1 || nameNode.length !== 1 || !name || name.length > 191 || !type || type.length > 64 || (rarity?.length ?? 0) > 64 || typeText.length > 131) throw new ItemTooltipError('Invalid compact item header.', 'compact_header_invalid');
-    const entries = roots.find('tr').toArray().filter(row => row !== headerRow[0] && !$(row).find('table').length)
+    const entries = roots.find('tr').toArray().filter(row => row !== headerRow[0])
         .flatMap(row => rowEntries($, row)).filter(entry => !ACCOUNT_STATE_LABELS.test(entry.label ?? ''));
     const rows = entries.map(entry => entry.text);
     const headerDetails = blocks.toArray().slice(2).map(block => clean($(block).text())).filter(Boolean);

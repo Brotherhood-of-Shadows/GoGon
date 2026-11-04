@@ -190,15 +190,16 @@ came from, and every change it makes to the tables Discord reads can be rolled b
   Modern and compact tooltips share type/stat handling with the Guide extractor. Resources, quest
   items, potions, recipes, components, containers, fragment stashes and equipment need no rarity
   field. Missing fields remain unknown; usage, recipe, ingredient, container and stash text, including
-  compact detail tables one level deep, is retained in item details. A compact Min Level becomes the
+  compact detail tables up to two levels deep (potion buff lists), is retained in item details. A compact Min Level becomes the
   item level; the account-specific Recipe Known flag is dropped.
 
   An unrecognized tooltip keeps the cursor and shows its parser code in *Last response*. When the
   response holds several distinct `item-tip` tables (`multiple_item_tables`) or nested ones
   (`nested_item_tables`), it also shows each table's name, type, enclosing elements and preceding
-  label. When the bot's character has an item equipped in the requested item's slot, the game
-  answers the same URL with a comparison: one wrapper table with the requested item in its first
-  cell and the equipped item in the second. Discovery reads the first and ignores the equipped one.
+  label. With the game's equipment comparison preference on, tooltips for the nine equippable item
+  types come back as one table holding an `Item Details` section (the requested item) and an
+  `Equipped Details` section (the character's equipped item of that slot). Discovery reads the
+  `Item Details` item and ignores the equipped one; other item types are never compared.
   Identical repeated copies are accepted as one; any other multi-item layout is rejected rather
   than guessed. The latest unrecognized response is saved, with scripts, forms, links and
   non-layout attributes removed, as an owner-only file in the private debug volume:
