@@ -8,8 +8,8 @@ import {
     Events 
 } from 'discord.js';
 
-// Guide module is disabled (Cloudflare bot detection)
-// import { guideCommand, handleGuideInteraction, handleGuideComponent } from './discord_modules/guide.js';
+// /guide reads GoGon's own catalog (specs/tasks/2026-11-discord-guide.md), never the live guide site.
+import { guideCommand, handleGuideAutocomplete, handleGuideCommand, handleGuideComponent } from './discord_modules/guide.js';
 
 import { handleGvgCooldownInteraction } from './discord_modules/gvg.js';
 import { handleBuffInteraction, handleBeBuffInteraction, handleCheckBuffsInteraction } from './discord_modules/buffs.js';
@@ -81,8 +81,8 @@ export async function setupDiscord(token, appId, guildId) {
                 buffCmd.toJSON(),
                 beBuffCmd.toJSON(),
                 checkBuffsCmd.toJSON(),
-                // guideCommand.toJSON(), // DISABLED - Cloudflare blocking
-                gvgCmd.toJSON()
+                gvgCmd.toJSON(),
+                guideCommand.toJSON(),
             ] }
         );
         console.log('[GoGon] ✅ Slash commands registered successfully');
@@ -93,12 +93,17 @@ export async function setupDiscord(token, appId, guildId) {
 
     // --- Event Handlers ---
     client.on(Events.InteractionCreate, async (interaction) => {
-        // Handle Component Interactions (Buttons, etc.)
+        // /guide autocomplete, menus and buttons. Other components are handled by their own collectors.
+        if (interaction.isAutocomplete?.()) {
+            if (interaction.commandName === 'guide') {
+                await handleGuideAutocomplete(interaction).catch(error => console.error('[GoGon] ❌ /guide autocomplete failed:', error?.code ?? error?.name ?? 'error'));
+            }
+            return;
+        }
         if (!interaction.isChatInputCommand()) {
-            // Guide component interactions disabled
-            // if (interaction.customId?.startsWith('guide:')) {
-            //     await handleGuideComponent(interaction);
-            // }
+            if (typeof interaction.customId === 'string' && interaction.customId.startsWith('guide:')) {
+                await handleGuideComponent(interaction).catch(error => console.error('[GoGon] ❌ /guide component failed:', error?.code ?? error?.name ?? 'error'));
+            }
             return;
         }
 
@@ -114,6 +119,8 @@ export async function setupDiscord(token, appId, guildId) {
                 await handleCheckBuffsInteraction(interaction);
             } else if (commandName === 'gvgcooldown') {
                 await handleGvgCooldownInteraction(interaction);
+            } else if (commandName === 'guide') {
+                await handleGuideCommand(interaction);
             }
         } catch (error) {
             console.error(`[GoGon] ❌ Error handling command ${commandName}:`, error);

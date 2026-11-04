@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Discord `/guide` (`discord-integration-v1` 1.7.0, AC-DISC-007; specs/tasks/2026-11-guide-catalog-reader.md, specs/tasks/2026-11-discord-guide.md): the old live guide scraper is replaced by look-ups in GoGon's MySQL catalog. `/guide item|creature|realm|master-realm|relic|quest` autocompletes names and replies privately with a card; menus open related entries, quests page through their stages, and Share posts the card publicly. Incomplete entries show a badge. `catalog/catalogReader.js` now provides search and card data and the dashboard's entity relations (output unchanged).
 - Licensing: GoGon is now licensed under the GNU Affero General Public License v3.0 or later (`LICENSE`, `NOTICE.md`). Code up to commit 18dcf39 also remains available under its earlier ISC license. Added the service's Terms of Use (`TERMS.md`) and LGPD Privacy Policy (`PRIVACY.md`); Brotherhood of Shadows is the operator, contacted through its Discord server.
 
 - Fix MySQL seed promotion failing when all three completeness reasons apply: migration 017 widens `incomplete_reason` from 64 to 128 characters so the 65-character diagnostic is preserved. The historical entity-key widening test now checks the two tables changed by migration 005, independently of newer Guide tracking tables.

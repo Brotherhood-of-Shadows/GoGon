@@ -45,6 +45,15 @@ mock.module(new URL('../../discord_modules/buffs.js', import.meta.url).href, {
 mock.module(new URL('../../discord_modules/gvg.js', import.meta.url).href, {
     namedExports: { handleGvgCooldownInteraction: handler('gvgcooldown') },
 });
+const { guideCommand } = await import('../../discord_modules/guide.js');
+mock.module(new URL('../../discord_modules/guide.js', import.meta.url).href, {
+    namedExports: {
+        guideCommand,
+        handleGuideAutocomplete: handler('guide:autocomplete'),
+        handleGuideCommand: handler('guide'),
+        handleGuideComponent: handler('guide:component'),
+    },
+});
 
 const { setupDiscord } = await import('../../discordBot.mjs');
 const { Events, Routes } = realDiscord;
@@ -75,7 +84,7 @@ beforeEach(() => {
     lastClient = null;
 });
 
-test('AC-DISC-001: registers /buff, /bebuff, /checkbuffs, /gvgcooldown on the guild route and logs in', async () => {
+test('AC-DISC-001: registers /buff, /bebuff, /checkbuffs, /gvgcooldown and /guide on the guild route and logs in', async () => {
     const client = await setupDiscord(TOKEN, APP_ID, GUILD_ID);
     assert.equal(client, lastClient);
     assert.equal(rest.token, TOKEN);
@@ -84,39 +93,44 @@ test('AC-DISC-001: registers /buff, /bebuff, /checkbuffs, /gvgcooldown on the gu
 
     const [{ route, body }] = rest.puts;
     assert.equal(route, Routes.applicationGuildCommands(APP_ID, GUILD_ID));
-    assert.deepEqual(body.map(c => c.name), ['buff', 'bebuff', 'checkbuffs', 'gvgcooldown']);
+    assert.deepEqual(body.map(c => c.name), ['buff', 'bebuff', 'checkbuffs', 'gvgcooldown', 'guide']);
     const options = Object.fromEntries(body.map(c => [c.name, (c.options ?? []).map(o => [o.name, o.required])]));
     assert.deepEqual(options, {
         buff: [['target', true], ['buffs', true]],
         bebuff: [['target', true], ['buffs', true]],
         checkbuffs: [['username', true]],
         gvgcooldown: [],
+        guide: ['item', 'creature', 'realm', 'master-realm', 'relic', 'quest'].map(name => [name, undefined]),
     });
+    const guide = body.find(c => c.name === 'guide');
+    assert.ok(guide.options.every(sub => sub.options.length === 1 && sub.options[0].name === 'name' && sub.options[0].required && sub.options[0].autocomplete));
 });
 
-test('AC-DISC-001: /guide stays unregistered and the client binds the interaction listener', async () => {
+test('AC-DISC-001: the client binds one interaction listener and one error listener', async () => {
     await setupDiscord(TOKEN, APP_ID, GUILD_ID);
-    assert.ok(!rest.puts[0].body.some(c => c.name === 'guide'));
     assert.equal(lastClient.listenerCount(Events.InteractionCreate), 1);
     assert.equal(lastClient.listenerCount(Events.Error), 1);
 });
 
 test('AC-DISC-001: each slash command routes to its own handler', async () => {
     await setupDiscord(TOKEN, APP_ID, GUILD_ID);
-    for (const name of ['buff', 'bebuff', 'checkbuffs', 'gvgcooldown']) {
+    for (const name of ['buff', 'bebuff', 'checkbuffs', 'gvgcooldown', 'guide']) {
         const interaction = chatInput(name);
         await dispatch(interaction);
         assert.equal(calls.at(-1).name, name);
         assert.equal(calls.at(-1).interaction, interaction);
     }
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 5);
 });
 
-test('AC-DISC-001: component interactions and unknown commands reach no handler', async () => {
+test('AC-DISC-007: /guide autocomplete and guide: components reach the guide; other components and unknown commands reach nothing', async () => {
     await setupDiscord(TOKEN, APP_ID, GUILD_ID);
-    await dispatch({ isChatInputCommand: () => false, customId: 'guide:next' });
-    await dispatch(chatInput('guide'));
-    assert.equal(calls.length, 0);
+    await dispatch({ isAutocomplete: () => true, commandName: 'guide', isChatInputCommand: () => false });
+    await dispatch({ isAutocomplete: () => true, commandName: 'buff', isChatInputCommand: () => false });
+    await dispatch({ isChatInputCommand: () => false, customId: 'guide:go:0' });
+    await dispatch({ isChatInputCommand: () => false, customId: 'checkbuffs:next' });
+    await dispatch(chatInput('unknown'));
+    assert.deepEqual(calls.map(call => call.name), ['guide:autocomplete', 'guide:component']);
 });
 
 test('AC-DISC-001: a failing handler gets an ephemeral reply, or an edited reply once deferred', async () => {

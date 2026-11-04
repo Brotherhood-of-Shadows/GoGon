@@ -162,6 +162,17 @@ proxy you control), set `GG_CONTROL_COOKIE_SECURE=1`.
 - **Audit log.** The Activity tab lists logins, denials, setting changes, and account switches. It records
   labels and keys only, never secret values.
 
+### Discord `/guide`
+
+`/guide item|creature|realm|master-realm|relic|quest name:` looks entries up in GoGon's own MySQL
+catalog; it never contacts guide.fallensword.com or the game. Typing in `name` autocompletes up to 25
+matches. Replies are visible only to the person who asked: menus open related entries (drops, realms,
+creatures, quests, relics, stairways, set pieces) in the same message, quests have stage buttons, and
+**Share** posts the current card to the channel without menus or mentions. Entries the catalog marks
+incomplete carry a badge with the same reason wording as the Catalog tab. Menus keep working after a
+restart. A database outage produces an ephemeral "Guide data is unavailable right now" and one
+`[guide]` error line; slow or failed autocomplete logs a `[guide]` warning without the typed text.
+
 ## 6. Catalog (`catalog-sync-v1`)
 
 The Catalog tab keeps items, creatures, realms, and master realms current. It records where each value

@@ -4,15 +4,19 @@
 spec:
   id: "discord-integration-v1"
   status: draft
-  version: "1.6.0"
+  version: "1.7.0"
   created: "2026-09-22"
-  updated: "2026-10-13"
+  updated: "2026-11-03"
 
   version_policy:
     sync_group: "api-surface"
     depends_on: ["business-domain", "security"]
 
   changelog:
+    - version: "1.7.0"
+      date: "2026-11-03"
+      changes:
+        - "Catalog /guide (specs/tasks/2026-11-guide-catalog-reader.md, specs/tasks/2026-11-discord-guide.md), owner decisions 2026-11-03: /guide item|creature|realm|master-realm|relic|quest with a required autocompleted name reads GoGon's MySQL catalog through catalog/catalogReader.js and never guide.fallensword.com or the game. Replies are ephemeral; relation select menus, quest stage buttons and a realm/master-realm button update the same message; Share posts the current card publicly without components or mentions. Incomplete entries show a badge with the dashboard's reason wording. custom_ids are stateless (guide:go|open|stage|share), so menus survive restarts. AC-DISC-001 now registers /guide; AC-DISC-007 added. Commands remain ungated (owner decision 2026-09-24)."
     - version: "1.6.0"
       date: "2026-10-13"
       changes:
@@ -51,7 +55,7 @@ domain:
   name: "Discord Integration, Commands & Webhook Delivery"
   description: |
     Handles Discord Bot lifecycle, gateway connection, slash command interactions (/buff, /bebuff,
-    /checkbuffs, /gvgcooldown), permissions/role gating, and the outbound webhook delivery pipeline
+    /checkbuffs, /gvgcooldown, /guide), permissions/role gating, and the outbound webhook delivery pipeline
     incorporating rate-limited sequential queues and burst message batching (up to 10 embeds per payload).
 
   id: discord-integration
@@ -61,7 +65,7 @@ domain:
   constitution_ref: specs/constitution.yaml
   boundary: 'Handles Discord Bot lifecycle, gateway connection, slash command interactions (/buff, /bebuff,
 
-    /checkbuffs, /gvgcooldown), permissions/role gating, and the outbound webhook delivery pipeline
+    /checkbuffs, /gvgcooldown, /guide), permissions/role gating, and the outbound webhook delivery pipeline
 
     incorporating rate-limited sequential queues and burst message batching (up to 10 embeds per payload).'
   current_implementation: Monitor alerts are claimed into the MySQL notification outbox and delivered through the
@@ -74,8 +78,8 @@ domain:
     scenarios:
     - given: Valid GG_DISCORD_TOKEN, GG_DISCORD_APP_ID, and GG_DISCORD_GUILD_ID in .env
       when: setupDiscord() is called during startup
-      then: Registers /buff, /bebuff, /checkbuffs, and /gvgcooldown with Discord REST API and binds interaction
-        event listeners
+      then: Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, and /guide with Discord REST API and binds interaction
+        event listeners, including /guide autocomplete and guide components
     - given: Discord credentials missing from .env
       when: setupDiscord() is evaluated in app.mjs
       then: Logs warning and skips bot initialization without preventing scraper engine execution
@@ -131,6 +135,25 @@ domain:
     - given: Application initiates shutdown while messages are in batch queue
       when: flushAllBatches() is called
       then: Immediately posts all pending batched embeds synchronously before process termination
+  - id: AC-DISC-007
+    statement: Catalog look-ups with /guide (specs/tasks/2026-11-discord-guide.md)
+    scenarios:
+    - given: A member types in a /guide subcommand's name option
+      when: Discord requests autocomplete
+      then: Responds within the interaction deadline with at most 25 catalog matches labelled name and hint;
+        a catalog failure or a 2.5 s deadline yields no choices and one WARN without the typed text
+    - given: A member picks or types an entry
+      when: The command runs
+      then: Replies ephemerally with the entry's card from MySQL (badge when incomplete), relation menus and Share;
+        an exact name match opens directly, several open a picker, none offers up to 5 suggestions
+    - given: A member uses a card menu, stage button or Share
+      when: The component interaction arrives, possibly after a restart
+      then: Menus and stages update the same ephemeral message; Share posts the card publicly without components
+        or mentions; a malformed custom_id expires and a deleted entry is reported, both ephemerally
+    - given: The catalog database is unavailable
+      when: Any /guide interaction runs
+      then: Replies ephemerally that guide data is unavailable and logs one ERR with operation and kind only; no
+        request reaches the game or guide.fallensword.com
   dependencies:
   - domain_ref: specs/auth-session.spec.yaml
     relationship: Slash commands invoke getBuffs and API calls through session layer.
@@ -204,7 +227,7 @@ acceptance_criteria:
     description: "Slash command registration and command routing"
     given: "Valid GG_DISCORD_TOKEN, GG_DISCORD_APP_ID, and GG_DISCORD_GUILD_ID in .env"
     when: "setupDiscord() is called during startup"
-    then: "Registers /buff, /bebuff, /checkbuffs, and /gvgcooldown with Discord REST API and binds interaction event listeners"
+    then: "Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, and /guide with Discord REST API and binds interaction event listeners, including /guide autocomplete and guide components"
     error_cases:
       - given: "Discord credentials missing from .env"
         when: "setupDiscord() is evaluated in app.mjs"

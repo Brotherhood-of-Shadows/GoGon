@@ -10,23 +10,13 @@ import { GUIDE_ORDERING } from './contracts/guide.js';
 import { readOperations, unavailableReason } from './requestPolicy.js';
 import { describeSeedSources } from './sourceRegistry.js';
 import { manualRecordFields, manualPolicyFields, validManualRecord, validEditRecord, mapGuideRecord } from './guideNormalizers.js';
+import { BROWSE_KINDS, SERVING, cellValue as cell, likePattern, dashboardRelations } from './catalogReader.js';
 
-export const BROWSE_KINDS = Object.freeze(['item', 'creature', 'realm', 'master_realm', 'relic', 'quest']);
+export { BROWSE_KINDS };
 export const JOB_ACTIONS = Object.freeze({ pause: 'paused', resume: 'queued', cancel: 'cancelled' });
 export const MAX_PAGE_SIZE = 100;
 export const MAX_PAGE = 10_000;
 
-// Serving columns each kind may return. JSON columns are parsed and size-bounded on the way out.
-const SERVING = {
-    item: { table: 'items', list: ['id', 'name', 'rarity', 'imageUrl'], detail: ['id', 'name', 'rarity', 'imageUrl', 'stats', 'enhancements', 'droppedBy', 'setBonuses', 'setId', 'setName', 'details'], json: ['stats', 'enhancements', 'droppedBy', 'setBonuses', 'details'] },
-    creature: { table: 'creatures', list: ['id', 'name', 'imageUrl'], detail: ['id', 'name', 'imageUrl', 'description', 'stats', 'enhancements', 'droppedItems'], json: ['stats', 'enhancements', 'droppedItems'] },
-    realm: { table: 'realms', list: ['id', 'name', 'min_level', 'master_realm_id'], detail: ['id', 'name', 'min_level', 'master_realm_id', 'shops', 'connections', 'map_objects'], json: ['shops', 'connections', 'map_objects'] },
-    master_realm: { table: 'master_realms', list: ['id', 'name'], detail: ['id', 'name', 'min_level', 'imageUrl', 'connected_realms'], json: ['connected_realms'] },
-    relic: { table: 'relics', list: ['id', 'name', 'realm_id'], detail: ['id', 'name', 'realm_id', 'details'], json: ['details'], natural: true },
-    quest: { table: 'quests', list: ['id', 'name', 'realm_id', 'min_level'], detail: ['id', 'name', 'realm_id', 'min_level', 'details'], json: ['details'], natural: true },
-};
-const INT_COLUMNS = new Set(['id', 'min_level', 'master_realm_id', 'setId', 'realm_id']);
-const MAX_JSON_OUT = 16 * 1024;
 const COMPLETENESS = ['complete', 'incomplete'];
 
 const invalid = (message, field) => new CatalogError('invalid', message, field ? { field } : {});
@@ -35,17 +25,6 @@ function validateFieldStates(kind, states = {}) {
     if (!states || typeof states !== 'object' || Array.isArray(states)
         || Object.entries(states).some(([path, state]) => !allowed.includes(path) || !['do_not_check', 'incomplete', 'complete'].includes(state))) throw invalid('Invalid field update labels.', 'fieldStates');
     return states;
-}
-const like = v => `%${v.replace(/[!%_]/g, m => `!${m}`)}%`;   // with ESCAPE '!'
-
-function cell(col, value, spec) {
-    if (value === null || value === undefined) return null;
-    if (typeof value === 'bigint' || INT_COLUMNS.has(col)) return Number(value);
-    if (spec.json.includes(col)) {
-        if (typeof value !== 'string' || value.length > MAX_JSON_OUT) return value === null ? null : { truncated: true };
-        try { return JSON.parse(value); } catch { return null; }
-    }
-    return typeof value === 'string' ? value.slice(0, 8192) : value;
 }
 
 /**
@@ -245,7 +224,7 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
                 params.push(completeness);
             }
             // Case-insensitive on both MySQL (utf8mb4_bin compares exactly) and SQLite.
-            if (q) { where.push("LOWER(s.name) LIKE ? ESCAPE '!'"); params.push(like(q.toLowerCase())); }
+            if (q) { where.push("LOWER(s.name) LIKE ? ESCAPE '!'"); params.push(likePattern(q.toLowerCase())); }
             const whereSql = where.length ? ` WHERE ${where.join(' AND ')}` : '';
             const [{ n }] = await db.query(`SELECT COUNT(*) AS n FROM ${from}${whereSql}`, params);
             const offset = (page - 1) * pageSize;
@@ -301,21 +280,8 @@ export function createCatalogService({ db, store, guideStore, collector = null, 
                  JOIN catalog_observations o ON o.id = ro.observation_id JOIN catalog_runs r ON r.id = ro.run_id
                  WHERE o.entity_kind = ? AND o.entity_key = ? ORDER BY ro.seq DESC LIMIT 50`, [kind, k]))
                 .map(p => ({ source: p.source, hash: String(p.payload_hash).slice(0, 12), runId: p.run_id, observedAt: p.observed_at, mode: p.mode, runStatus: p.status }));
-            const relations = {};
+            const relations = await dashboardRelations(db, kind, fields);
             const id = Number(row.id);
-            if (kind === 'master_realm') {
-                relations.connectedRealms = Array.isArray(fields.connected_realms)
-                    ? fields.connected_realms.map(realm => ({ id: realm.realmId, name: realm.realmName, minLevel: realm.minLevel })) : [];
-            } else if (kind === 'realm') {
-                relations.creatures = (await db.query('SELECT c.id, c.name FROM realm_creatures rc JOIN creatures c ON c.id = rc.creature_id WHERE rc.realm_id = ? ORDER BY c.id LIMIT 200', [id])).map(r => ({ id: Number(r.id), name: r.name }));
-                relations.relics = (await db.query('SELECT name FROM relics WHERE realm_id = ? ORDER BY name LIMIT 200', [id])).map(r => r.name);
-                relations.quests = (await db.query('SELECT name, min_level FROM quests WHERE realm_id = ? ORDER BY name LIMIT 200', [id])).map(r => ({ name: r.name, minLevel: r.min_level === null ? null : Number(r.min_level) }));
-            } else if (kind === 'creature') {
-                relations.realms = (await db.query('SELECT r.id, r.name FROM realm_creatures rc JOIN realms r ON r.id = rc.realm_id WHERE rc.creature_id = ? ORDER BY r.id LIMIT 200', [id])).map(r => ({ id: Number(r.id), name: r.name }));
-                relations.drops = (await db.query('SELECT i.id, i.name FROM creature_drops cd JOIN items i ON i.id = cd.item_id WHERE cd.creature_id = ? ORDER BY i.id LIMIT 200', [id])).map(r => ({ id: Number(r.id), name: r.name }));
-            } else if (kind === 'item') {
-                relations.droppedBy = (await db.query('SELECT c.id, c.name FROM creature_drops cd JOIN creatures c ON c.id = cd.creature_id WHERE cd.item_id = ? ORDER BY c.id LIMIT 200', [id])).map(r => ({ id: Number(r.id), name: r.name }));
-            }
             const guide = spec.natural ? await guideStore.getStateForEntityKey(kind, k) : await guideStore.getIdState(kind, id);
             return {
                 kind, key: k, fields, relations, provenance,
