@@ -16,6 +16,12 @@ const KIND_PATTERN = 'item|creature|realm|master_realm|relic|quest';
 const VALUE = new RegExp(`^(${KIND_PATTERN}):([1-9]\\d{0,17})$`);
 const CUSTOM_ID = new RegExp(`^guide:(?:go:([0-3])|open:(${KIND_PATTERN}):([1-9]\\d{0,17})|stage:([1-9]\\d{0,17}):([1-9]\\d?)|share:(${KIND_PATTERN}):([1-9]\\d{0,17}):(0|[1-9]\\d?))$`);
 const AUTOCOMPLETE_DEADLINE_MS = 2500;
+// Discord drops a component interaction that is not acknowledged within 3 s of the click. If the
+// catalog read has not finished 2 s after the click, the click is acknowledged first and the card
+// follows as an edit. Clicks answered more than 1.5 s after they were made are logged with timings.
+const ACK_DEADLINE_MS = 2000;
+const SLOW_RESPONSE_MS = 1500;
+const DEFER = Symbol('defer');
 const MAX_MENUS = 4;
 
 export const MESSAGES = Object.freeze({
@@ -255,6 +261,11 @@ const ephemeral = body => ({ ...body, flags: MessageFlags.Ephemeral });
 const onPrivateCard = interaction => Boolean(interaction.message?.flags?.has?.(MessageFlags.Ephemeral));
 const noMentions = { allowedMentions: { parse: [] } };
 
+function describeTiming(timing, respond) {
+    return `reached GoGon ${timing.delivered} ms after the click, catalog read ${timing.read} ms, `
+        + `Discord answered in ${respond} ms${timing.deferred ? ' (acknowledged early)' : ''}`;
+}
+
 function withDeadline(promise, ms) {
     let timer;
     return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('deadline'), { code: 'deadline' })), ms); })])
@@ -262,14 +273,20 @@ function withDeadline(promise, ms) {
 }
 
 /** Builds the /guide handlers around a catalog reader.
- * @param {{getReader?: () => Promise<object>, log?: {warn: Function, error: Function}, autocompleteDeadlineMs?: number}} [deps]
- *     Reader factory, logger and autocomplete deadline (Discord allows 3 s for the first response).
+ * @param {{getReader?: () => Promise<object>, log?: {warn: Function, error: Function}, autocompleteDeadlineMs?: number,
+ *     ackDeadlineMs?: number, slowResponseMs?: number, now?: () => number}} [deps]
+ *     Reader factory, logger, autocomplete deadline, how long after a click a component is
+ *     acknowledged early, when a response counts as slow, and the clock (Discord allows 3 s for the
+ *     first response).
  * @returns {{autocomplete: Function, command: Function, component: Function}} Interaction handlers.
  */
 export function createGuideHandlers({
     getReader = async () => createCatalogReader({ db: await getConnection() }),
     log = { warn: message => WARN('guide', message), error: message => ERR('guide', message) },
     autocompleteDeadlineMs = AUTOCOMPLETE_DEADLINE_MS,
+    ackDeadlineMs = ACK_DEADLINE_MS,
+    slowResponseMs = SLOW_RESPONSE_MS,
+    now = Date.now,
 } = {}) {
     const kindOf = interaction => SUBCOMMANDS[interaction.options.getSubcommand(false)] ?? null;
 
@@ -316,23 +333,69 @@ export function createGuideHandlers({
         }
     }
 
+    // How a component is answered: 'update' edits the requester's private card, 'ephemeral' answers a
+    // click on a shared post with a private card, 'public' is Share.
+    const acknowledge = { update: i => i.deferUpdate(), ephemeral: i => i.deferReply({ flags: MessageFlags.Ephemeral }), public: i => i.deferReply() };
+
+    function sendCard(interaction, mode, deferred, body) {
+        if (mode === 'update') return deferred ? interaction.editReply({ content: '', ...body }) : interaction.update({ content: '', ...body });
+        if (deferred) return interaction.editReply(body);
+        return interaction.reply(mode === 'ephemeral' ? ephemeral(body) : body);
+    }
+
+    async function sendNotice(interaction, mode, deferred, content) {
+        if (!deferred) return interaction.reply(ephemeral({ content }));
+        if (mode === 'ephemeral') return interaction.editReply({ content, embeds: [], components: [] });
+        // The requester's card stays as it was; a deferred public reply must not show the notice publicly.
+        if (mode === 'public') await interaction.deleteReply().catch(() => {});
+        return interaction.followUp(ephemeral({ content }));
+    }
+
     async function component(interaction) {
+        const clickedAt = Number.isFinite(interaction.createdTimestamp) ? interaction.createdTimestamp : now();
+        const timing = { delivered: Math.max(0, now() - clickedAt), read: 0, respond: 0, deferred: false };
         const parsed = parseGuideCustomId(interaction.customId, interaction.values);
         if (!parsed) return interaction.reply(ephemeral({ content: MESSAGES.expired }));
-        let card;
+        const mode = parsed.action === 'share' ? 'public' : onPrivateCard(interaction) ? 'update' : 'ephemeral';
+        const label = `${parsed.action} ${parsed.kind}`;
+        let phase = 'read';
+        let started = now();
+        let timer;
         try {
-            card = await (await getReader()).card(parsed.kind, parsed.id);
+            const read = (async () => (await getReader()).card(parsed.kind, parsed.id))();
+            read.catch(() => {}); // handled below; keeps an early acknowledgement from leaving it unobserved
+            const first = await Promise.race([read, new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, ackDeadlineMs - timing.delivered), DEFER); })]);
+            clearTimeout(timer);
+            let card = first;
+            if (first === DEFER) {
+                phase = 'acknowledge';
+                await acknowledge[mode](interaction);
+                timing.deferred = true;
+                phase = 'read';
+                card = await read;
+            }
+            timing.read = now() - started;
+            phase = 'respond';
+            started = now();
+            if (!card) await sendNotice(interaction, mode, timing.deferred, MESSAGES.gone);
+            else if (mode === 'public') {
+                await sendCard(interaction, mode, timing.deferred, { ...renderCard(card, { stage: parsed.stage, shared: true }), ...noMentions });
+                await interaction.followUp(ephemeral({ content: MESSAGES.shared }));
+            } else await sendCard(interaction, mode, timing.deferred, renderCard(card, { stage: parsed.stage }));
+            timing.respond = now() - started;
         } catch (error) {
-            log.error(`Navigation failed for ${parsed.kind} (${error?.code ?? 'error'}).`);
-            return interaction.reply(ephemeral({ content: MESSAGES.unavailable }));
+            clearTimeout(timer);
+            if (phase === 'read') {
+                log.error(`Navigation failed for ${parsed.kind} (${error?.code ?? 'error'}).`);
+                return sendNotice(interaction, mode, timing.deferred, MESSAGES.unavailable).catch(() => {});
+            }
+            // 10062 (unknown interaction) means Discord had already given up on the click.
+            log.warn(`Discord rejected the ${label} response (${error?.code ?? error?.name ?? 'error'}; ${phase}): ${describeTiming(timing, now() - started)}.`);
+            return undefined;
         }
-        if (!card) return interaction.reply(ephemeral({ content: MESSAGES.gone }));
-        if (parsed.action === 'share') {
-            await interaction.reply({ ...renderCard(card, { stage: parsed.stage, shared: true }), ...noMentions });
-            return interaction.followUp(ephemeral({ content: MESSAGES.shared }));
-        }
-        const body = renderCard(card, { stage: parsed.stage });
-        return onPrivateCard(interaction) ? interaction.update({ content: '', ...body }) : interaction.reply(ephemeral(body));
+        const total = now() - clickedAt;
+        if (total > slowResponseMs || timing.deferred) log.warn(`Slow ${label}: ${describeTiming(timing, timing.respond)}, ${total} ms in total.`);
+        return undefined;
     }
 
     return { autocomplete, command, component };

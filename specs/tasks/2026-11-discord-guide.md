@@ -68,6 +68,13 @@ Depends on `2026-11-guide-catalog-reader.md` (`createCatalogReader`).
   the card shows the stage heading with a progress line, then **Requirements** (one line per
   requirement), **Story** as a block quote shortened before the reward if needed, and **Reward**
   (the closing "You receive/Gain N XP…" sentence without its verb). Other stage text is shown as is.
+- AC-5b: Given a component whose catalog read is still running 2 s after the click (from the
+  interaction's creation time), the bot acknowledges first (`deferUpdate` on the requester's card,
+  ephemeral `deferReply` on a shared post, public `deferReply` for Share) and then edits the reply;
+  an outage after a public acknowledgement deletes it and reports privately. A component answered
+  more than 1.5 s after the click, or one whose response Discord rejects, logs one WARN with the
+  delivery, read and response times and the error code only (owner report 2026-11-04 of a stage
+  button that stayed loading with nothing logged).
 - AC-6: Given a typed name not chosen from autocomplete, the bot resolves an exact case-insensitive
   match of that kind; if several match it shows an ephemeral picker; if none match it replies
   ephemerally "No <kind> named …" with up to 5 suggestions. Given a menu or button for an entry that

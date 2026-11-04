@@ -177,6 +177,14 @@ incomplete carry a badge with the same reason wording as the Catalog tab. Menus 
 restart. A database outage produces an ephemeral "Guide data is unavailable right now" and one
 `[guide]` error line; slow or failed autocomplete logs a `[guide]` warning without the typed text.
 
+A button or menu that stays on its loading dots can be traced with the `[guide]` warnings:
+`Slow stage quest: reached GoGon 2600 ms after the click, catalog read 12 ms, Discord answered in 180 ms…`
+splits the wait into Discord delivering the click (or GoGon being busy), the MySQL read, and Discord
+accepting the reply. A read still running 2 s after the click is acknowledged early ("acknowledged
+early") so the click cannot fail; `Discord rejected the … response (10062 …)` means Discord had
+already given up on it. If a click looks frozen and no warning appears, GoGon answered within 1.5 s and
+the delay was in Discord or the Discord app.
+
 ### Discord `/about`
 
 `/about` replies privately with GoGon's version and its license (GNU AGPL-3.0-or-later), with buttons

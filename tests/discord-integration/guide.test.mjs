@@ -56,18 +56,24 @@ function handlers(reader, extra = {}) {
 }
 
 // Component interactions come from the requester's ephemeral card unless `onShared` is set.
-function interaction({ sub = 'item', name, focused, customId, values, onShared = false } = {}) {
+function interaction({ sub = 'item', name, focused, customId, values, onShared = false, createdTimestamp, failOn } = {}) {
     const out = [];
+    const record = method => async body => {
+        out.push(body === undefined ? [method] : [method, body]);
+        if (method === failOn) throw Object.assign(new Error('Unknown interaction'), { code: 10062 });
+    };
     return {
-        out, customId, values,
+        out, customId, values, createdTimestamp,
         message: { flags: new MessageFlagsBitField(onShared ? 0 : MessageFlags.Ephemeral) },
         options: { getSubcommand: () => sub, getString: () => name, getFocused: () => focused },
-        respond: async choices => out.push(['respond', choices]),
-        deferReply: async body => out.push(['deferReply', body]),
-        editReply: async body => out.push(['editReply', body]),
-        reply: async body => out.push(['reply', body]),
-        followUp: async body => out.push(['followUp', body]),
-        update: async body => out.push(['update', body]),
+        respond: record('respond'),
+        deferReply: record('deferReply'),
+        deferUpdate: record('deferUpdate'),
+        deleteReply: record('deleteReply'),
+        editReply: record('editReply'),
+        reply: record('reply'),
+        followUp: record('followUp'),
+        update: record('update'),
     };
 }
 
@@ -247,6 +253,59 @@ test('menus, stage buttons and Share navigate statelessly; Share posts the navig
     const missing = interaction({ customId: 'guide:open:item:424242' });
     await h.component(missing);
     assert.deepEqual(missing.out, [['reply', { content: MESSAGES.gone, flags: MessageFlags.Ephemeral }]]);
+});
+
+test('a slow catalog read is acknowledged before Discord gives up on the click, then the card follows as an edit', async () => {
+    const slow = (ms, result = undefined) => async (kind, id) => {
+        await new Promise(resolve => setTimeout(resolve, ms));
+        if (result instanceof Error) throw result;
+        return Object.values(CARDS).find(c => c.kind === kind && c.id === id) ?? null;
+    };
+    const fast = { ackDeadlineMs: 10, slowResponseMs: 5 };
+    const methods = i => i.out.map(entry => entry[0]);
+
+    const own = handlers(fakeReader({ card: slow(40) }).reader, fast);
+    const ownClick = interaction({ customId: 'guide:stage:51:2' });
+    await own.component(ownClick);
+    assert.deepEqual(methods(ownClick), ['deferUpdate', 'editReply']);
+    assert.match(ownClick.out[1][1].embeds[0].description, /Stage 2 of 2/);
+    assert.equal(own.logs.length, 1);
+    assert.match(own.logs[0][1], /^Slow stage quest: reached GoGon \d+ ms after the click, catalog read \d+ ms, Discord answered in \d+ ms \(acknowledged early\), \d+ ms in total\.$/);
+
+    const onPost = handlers(fakeReader({ card: slow(40) }).reader, fast);
+    const postClick = interaction({ customId: 'guide:stage:51:1', onShared: true });
+    await onPost.component(postClick);
+    assert.deepEqual(postClick.out.slice(0, 1), [['deferReply', { flags: MessageFlags.Ephemeral }]]);
+    assert.equal(postClick.out[1][0], 'editReply');
+
+    const share = handlers(fakeReader({ card: slow(40) }).reader, fast);
+    const shareClick = interaction({ customId: 'guide:share:quest:51:1' });
+    await share.component(shareClick);
+    assert.deepEqual(methods(shareClick), ['deferReply', 'editReply', 'followUp']);
+    assert.deepEqual(shareClick.out[0], ['deferReply'], 'a deferred Share is public');
+    assert.deepEqual(shareClick.out[1][1].allowedMentions, { parse: [] });
+
+    const failing = handlers(fakeReader({ card: slow(40, new Error('down')) }).reader, fast);
+    const failedShare = interaction({ customId: 'guide:share:quest:51:1' });
+    await failing.component(failedShare);
+    assert.deepEqual(failedShare.out, [['deferReply'], ['deleteReply'], ['followUp', { content: MESSAGES.unavailable, flags: MessageFlags.Ephemeral }]],
+        'an outage after a public acknowledgement is reported privately');
+
+    // A click that reached GoGon long after it was made is acknowledged at once.
+    const late = handlers(fakeReader({ card: slow(20) }).reader, { ackDeadlineMs: 2000 });
+    const lateClick = interaction({ customId: 'guide:stage:51:2', createdTimestamp: Date.now() - 2500 });
+    await late.component(lateClick);
+    assert.deepEqual(methods(lateClick), ['deferUpdate', 'editReply']);
+    assert.match(late.logs[0][1], /reached GoGon (2[5-9]\d\d|\d{4,}) ms after the click/);
+});
+
+test('a response Discord rejects is logged once with its timings', async () => {
+    const ok = handlers(fakeReader().reader);
+    const rejected = interaction({ customId: 'guide:stage:51:2', failOn: 'update' });
+    await ok.component(rejected);
+    assert.deepEqual(rejected.out.map(entry => entry[0]), ['update']);
+    assert.equal(ok.logs.length, 1);
+    assert.match(ok.logs[0][1], /^Discord rejected the stage quest response \(10062; respond\): reached GoGon \d+ ms after the click/);
 });
 
 test('malformed or foreign custom IDs expire without touching the catalog; outages are reported once', async () => {

@@ -19,6 +19,7 @@ spec:
         - "Owner request 2026-11-04: /guide Share posts the whole navigable card (relation menus, quest stage buttons, realm/master-realm button; no Share button) instead of a component-free copy. On a shared post those components open a private card for the member who clicks, and the post itself never changes. AC-DISC-007 updated (task spec AC-5)."
         - "/about (discord_modules/about.js) replies ephemerally with the version, the AGPL-3.0-or-later notice and link buttons to the source repository, TERMS.md, PRIVACY.md and LICENSE: the AGPL section 13 source offer for Discord users. AC-DISC-001 now registers /about."
         - "Quest stage layout (owner request 2026-11-04): renderCard splits stored stage text ('Label: value. … — story … reward') into Requirements, Story (block quote, at most 3200 characters) and Reward sections with a stage progress line; text without that shape renders unchanged. Display only; stored data and the parser are unchanged."
+        - "Component latency (owner report 2026-11-04, stage button stuck loading with no log): a /guide click whose catalog read is unfinished 2 s after the click is acknowledged first and edited in; slow (over 1.5 s) or rejected responses log one WARN with delivery, read and response times and the error code."
         - "RULE-002: quickBuff no longer logs the game's quickbuff HTML when the report is missing or unrecognised; it logs the hint, response length and message count."
     - version: "1.7.0"
       date: "2026-11-03"
