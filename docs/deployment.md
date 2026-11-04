@@ -181,8 +181,22 @@ came from, and every change it makes to the tables Discord reads can be rolled b
   login pages and challenges preserve progress; only a successful `Invalid Request` response means
   an unused ID. Known-item checks before and after a pass detect game maintenance.
   Modern and compact tooltips share type/stat handling with the Guide extractor. Resources, quest
-  items, potions, recipes, components, fragments and equipment need no rarity field. Missing fields
-  remain unknown; usage, recipe, ingredient and component text is retained in item details.
+  items, potions, recipes, components, containers, fragment stashes and equipment need no rarity
+  field. Missing fields remain unknown; usage, recipe, ingredient, container and stash text, including
+  compact detail tables one level deep, is retained in item details. A compact Min Level becomes the
+  item level; the account-specific Recipe Known flag is dropped.
+
+  An unrecognized tooltip keeps the cursor and shows its parser code in *Last response*. When the
+  response holds several distinct `item-tip` tables (`multiple_item_tables`) or nested ones
+  (`nested_item_tables`), it also shows each table's name, type, enclosing elements and preceding
+  label. Discovery never guesses which table is the requested item; identical repeated copies are
+  accepted as one. The latest unrecognized response is saved, with scripts, forms, links and
+  non-layout attributes removed, as an owner-only file in the private debug volume:
+
+  ```sh
+  docker compose run --rm --no-deps -T --entrypoint cat gogon \
+    /var/lib/gogon-sso-debug/last-item-tooltip.html > item-tooltip.html
+  ```
   Recent discoveries lists newly queued releases; the known-item validation probe is excluded.
   The **Last response** line records the exact item ID and whether it was a known-item check or
   exploration, plus HTTP status, response category, byte count and a specific parser rejection code.

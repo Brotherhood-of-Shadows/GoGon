@@ -11,6 +11,8 @@ const quest = readFileSync('tests/catalog-sync/fixtures/item-tooltip-quest.html'
 const epic = readFileSync('tests/catalog-sync/fixtures/item-tooltip-epic-weapon.html', 'utf8');
 
 test('owner 17070 Twangy’s Axe parses its actual equipment HTML, full document and helper-injected tags', () => {
+    const helperTags = '<link type="text/css" rel="stylesheet" href="https://fallenswordhelper.github.io/fallenswordhelper/resources/prod/1524/calfSystem.min.css"><script async="" src="https://www.googletagmanager.com/gtag/js?id=G-14Y99WX8XL"></script>';
+    assert.deepEqual(parseItemTooltip(epic.replace('</body>', `${helperTags}</body>`), 17070), parseItemTooltip(epic, 17070));
     const { found, record } = parseItemTooltip(epic, 17070);
     assert.equal(found, true);
     assert.equal(record.name, 'Twangy’s Axe');
@@ -89,13 +91,77 @@ test('owner tooltip extracts every bonus, enhancement, set piece, level and dura
 
 test('only explicit Invalid Request marks an ID as absent; malformed numbers, pages and oversized data fail closed', () => {
     assert.deepEqual(parseItemTooltip(' \nInvalid Request\n', 17060), { found: false });
-    for (const body of ['', '<html>Maintenance</html>', '<html>Please log in</html>', '<p>Invalid Request</p>', html.replace('+8803', 'unknown'), html.replace('160&nbsp;/&nbsp;160', '161/160'), html.repeat(2), 'x'.repeat(2_100_000)]) {
+    for (const body of ['', '<html>Maintenance</html>', '<html>Please log in</html>', '<p>Invalid Request</p>', html.replace('+8803', 'unknown'), html.replace('160&nbsp;/&nbsp;160', '161/160'), html + html.replace('Cuirass of Encillious', 'Other item'), 'x'.repeat(2_100_000)]) {
         assert.throws(() => parseItemTooltip(body, 17060), ItemTooltipError);
     }
+    assert.deepEqual(parseItemTooltip(html.repeat(2), 17060), parseItemTooltip(html, 17060), 'identical copies describe one item');
     for (const id of [0, -1, 1.5, 10_000_001]) assert.throws(() => parseItemTooltip(html, id), ItemTooltipError);
 });
 
 test('tooltip transport permits only the exact read-only item URL', () => {
     assert.equal(assertItemTooltipUrl(itemTooltipUrl(17060)), 'https://www.fallensword.com/fetchitem.php?item_id=17060&inv_id=-1&t=0&extra=0');
     for (const url of ['https://evil.example/fetchitem.php?item_id=1', itemTooltipUrl(1) + '&action=buy', itemTooltipUrl(1).replace('inv_id=-1', 'inv_id=1'), itemTooltipUrl(1).replace('https:', 'http:')]) assert.throws(() => assertItemTooltipUrl(url));
+});
+
+test('identical repeated tooltip tables parse once; distinct or nested tables are rejected with a safe structural summary', () => {
+    const table = epic.match(/<table[\s\S]*<\/table>/)[0];
+    const repeated = `<html><body>${table}\n  ${table.replace(/> </g, '>\n    <')}</body></html>`;
+    assert.deepEqual(parseItemTooltip(repeated, 17070), parseItemTooltip(epic, 17070));
+
+    const equipped = table.replace('Twangy’s Axe', 'Equipped Blade').replace('Weapon - Epic', 'Weapon - Rare');
+    const compare = `<html><body>${table}<div class="compare"><b>Currently Equipped</b>${equipped}</div><script>var fsRequestToken = 'secret-token';</script></body></html>`;
+    assert.throws(() => parseItemTooltip(compare, 17070), error => {
+        assert.equal(error.code, 'multiple_item_tables');
+        assert.equal(error.detail, '2 item-tip tables: #1 "Twangy’s Axe" Weapon - Epic in body; #2 "Equipped Blade" Weapon - Rare in body>div.compare after "Currently Equipped"');
+        return true;
+    });
+
+    const nested = table.replace('<td colspan="2" class="item-tip-section">Bonuses</td>', `<td colspan="2">${equipped}</td>`);
+    assert.throws(() => parseItemTooltip(nested, 17070), error => error.code === 'nested_item_tables' && /\(nested\)/.test(error.detail));
+
+    const many = `<body>${Array.from({ length: 9 }, (_, n) => table.replace('Twangy’s Axe', `Item ${n} ${'x'.repeat(80)}\u0007`)).join('')}</body>`;
+    assert.throws(() => parseItemTooltip(many, 17070), error => error.detail.length <= 480 && !/\p{C}/u.test(error.detail) && error.detail.startsWith('9 item-tip tables'));
+});
+
+const compact = name => readFileSync(`tests/catalog-sync/fixtures/item-tooltip-compact-${name}.html`, 'utf8');
+
+test('owner compact tooltips with nested detail tables parse recipes, components, containers, stashes and resources', () => {
+    const image = id => `https://cdn2.fallensword.com/items/${id}.gif`;
+    assert.deepEqual(parseItemTooltip(compact('recipe'), 17071).record, { id: 17071, name: 'Recipe of Twangy’s Axe', imageUrl: image(17071), rarity: 'Epic',
+        stats: { type: 'Recipe', level: 5900 }, details: { tooltipRows: ['Min Level: 5900'], nameColor: '#00CC00' } });
+    assert.deepEqual(parseItemTooltip(compact('component'), 17072).record, { id: 17072, name: 'Shimmering Blue Feathers', imageUrl: image(17072), rarity: 'Unique',
+        stats: { type: 'Component' }, details: { tooltipRows: ['Used in recipes:', 'Peacock Headdress', 'Peacock Collared Cloak', 'Peacock Gloves'], nameColor: '#CC00CC' } });
+    assert.deepEqual(parseItemTooltip(compact('container'), 17073).record, { id: 17073, name: 'Average Easter Basket', imageUrl: image(17073), rarity: 'Rare',
+        stats: { type: 'Container' }, details: { tooltipRows: ['Open this container to choose one of the items below.', 'Items:',
+            'Average Dark Choco Egg (Rare Potion): Coordinated Defense [325, 60m], Flinch [325, 60m], Last Ditch [200, 60m]',
+            'Average White Choco Egg (Rare Potion): Conserve [300, 60m], Animal Magnetism [350, 60m], Doubler [700, 60m]',
+            'Simple Dark Choco Egg (Common Potion): Coordinated Defense [225, 30m], Flinch [225, 30m]',
+            'Simple White Choco Egg (Common Potion): Conserve [200, 30m], Animal Magnetism [300, 30m]'], nameColor: '#00CCCC', typeDetails: ['Bound (Non-Tradable)'] } });
+    assert.deepEqual(parseItemTooltip(compact('fragment-stash'), 17074).record, { id: 17074, name: 'Bunnies Discarded Egg Wrapper', imageUrl: image(17074), rarity: 'Rare',
+        stats: { type: 'Fragment Stash' }, details: { tooltipRows: ['Open this fragment stash to add its contents to your current Composing Fragments. This stash can contain the following:',
+            'Common: 10 - 15', 'Rare: 5 - 10', 'Unique: 1 - 5', 'Legendary: 0 - 1', 'Crystalline: 0 - 1'], nameColor: '#00CCCC', typeDetails: ['Bound (Non-Tradable)'] } });
+    assert.deepEqual(parseItemTooltip(compact('resource'), 17075).record, { id: 17075, name: 'Abomination Corpse', imageUrl: image(17075), rarity: 'Legendary',
+        stats: { type: 'Resource' }, details: { tooltipRows: ['Used in recipes:'], nameColor: '#FFCC00' } });
+});
+
+test('compact recipe announcement shows Min Level once and never the bot account’s Recipe Known state', () => {
+    const { record } = parseItemTooltip(compact('recipe'), 17071);
+    assert.doesNotMatch(JSON.stringify(record), /Recipe Known|\bNo\b/);
+    const embed = itemReleaseMessage(record, '2026-11-03T00:00:00.000Z').embeds[0];
+    assert.equal(embed.description, 'Recipe • Epic\nGuide verification pending.');
+    assert.deepEqual(embed.fields, [{ name: 'Min level', value: '5900', inline: true }]);
+    const stash = itemReleaseMessage(parseItemTooltip(compact('fragment-stash'), 17074).record, '2026-11-03T00:00:00.000Z').embeds[0];
+    assert.match(stash.fields.find(field => field.name === 'Item details').value, /^Open this fragment stash[\s\S]*\nCommon: 10 - 15\n[\s\S]*Crystalline: 0 - 1$/);
+});
+
+test('compact detail tables stay one level deep, outside the header, and keep a numeric Min Level', () => {
+    const recipe = compact('recipe');
+    const inner = '<table><tr><td>x</td></tr></table>';
+    for (const body of [
+        recipe.replace('<font color="#999999">Min Level:</font>', `<font color="#999999">Min Level:</font>${inner}`),
+        recipe.replace('<div>Recipe - Epic</div>', `<div>Recipe - Epic</div>${inner}`),
+        recipe.replace('</tbody></table></body>', `${`<tr><td>${inner}</td></tr>`.repeat(8)}</tbody></table></body>`),
+    ]) assert.throws(() => parseItemTooltip(body, 17071), error => error.code === 'compact_layout_invalid');
+    assert.throws(() => parseItemTooltip(recipe.replace('>5900<', '>about 5900<'), 17071), error => error.code === 'invalid_number');
+    assert.throws(() => parseItemTooltip(`${recipe}${recipe}`, 17071), error => error.code === 'compact_layout_invalid');
 });

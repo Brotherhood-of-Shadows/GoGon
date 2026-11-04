@@ -24,6 +24,7 @@ import { renewGuideClearance } from '../catalog/guideClearance.js';
 import { configureCatalogTask, runCatalogSync } from '../catalog/catalogTask.js';
 import { createItemDiscoveryStore } from '../_gg_data/handler/itemDiscoveryStore.js';
 import { createItemDiscovery } from '../catalog/itemDiscovery.js';
+import { createItemTooltipRetention } from '../catalog/itemTooltipRetention.js';
 
 /**
  * CAT-TASK-005: one catalog store and collector shared by the CatalogSync engine task and the
@@ -46,7 +47,7 @@ export async function createCatalog() {
     });
     const itemDiscovery = createItemDiscovery({ store: createItemDiscoveryStore(db, store), fetchFn: authedFetch,
         getHeaders: () => ({ 'user-agent': getSetting('GG_UA') || DEFAULT_UA, 'accept-language': getSetting('GG_LANG') || DEFAULT_LANG, referer: 'https://www.fallensword.com/index.php' }),
-        getWebhook: () => getSetting('GG_UPCOMING_WEBHOOK'), sessionReady: () => !engine.isPaused() });
+        getWebhook: () => getSetting('GG_UPCOMING_WEBHOOK'), sessionReady: () => !engine.isPaused(), retainUnrecognized: createItemTooltipRetention() });
     configureCatalogTask({ store, collector, guideWorker, itemDiscovery });
     const service = createCatalogService({ db, store, guideStore, collector, relay, itemDiscovery, guideWorker, seeds: createSeedService({ db, store }) });
     return { db, store, guideStore, collector, relay, service, runNow: () => runCatalogSync({}) };

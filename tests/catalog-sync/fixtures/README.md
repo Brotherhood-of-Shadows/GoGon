@@ -26,6 +26,14 @@ requests.
 Its compact table has a Quest type and usage/recipe notes, with no `item-tip` table class,
 rarity or equipment fields. It covers both the known-item probe and new item discovery.
 
-`item-tooltip-epic-weapon.html` is the owner's item 17070 (Twangy’s Axe) document, with whitespace
-formatted for readability and its helper stylesheet/analytics tags retained. It covers all twelve
-enhancements, stamina/XP bonuses, the equipment divider, and the actual 17069 → 17070 workflow.
+`item-tooltip-compact-{recipe,component,container,fragment-stash,resource}.html` are owner-supplied
+compact tooltips, as the browser shows them, whose details sit in one nested table (recipe Min Level
+and per-account Recipe Known, recipe usage lists, container choices, stash fragment ranges, and an
+empty resource usage list). Recipe Known is account state and is never stored.
+
+`item-tooltip-epic-weapon.html` is the owner's item 17070 (Twangy’s Axe) document as the browser
+shows it without Fallen Sword Helper (which appends a `calfSystem.min.css` link and its gtag
+script; tests add those separately). It covers all twelve enhancements, stamina/XP bonuses, the
+equipment divider, and the actual 17069 → 17070 workflow. The worker's own session received a
+different 5302-byte response with several `item-tip` tables for this ID (2026-11-03), so this
+fixture attests the owner's view, not the bot account's.

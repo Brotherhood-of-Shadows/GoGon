@@ -18,10 +18,11 @@ function responseRoute(value) {
 }
 
 /** Daily discovery in resumable, rate-limited CatalogSync batches; never submits game actions.
- * @param {object} dependencies Injected persistence, authenticated GET transport and settings.
+ * @param {object} dependencies Injected persistence, authenticated GET transport, settings and
+ *     `retainUnrecognized(id, html)`, which keeps the latest unrecognized tooltip for the owner.
  * @returns {object} Worker and owner controls.
  */
-export function createItemDiscovery({ store, fetchFn, getWebhook, getHeaders = () => ({}), log = console.warn, sessionReady = () => true, queue = gameQueue, now = Date.now, policy = GAME_POLICY }) {
+export function createItemDiscovery({ store, fetchFn, getWebhook, getHeaders = () => ({}), log = console.warn, retainUnrecognized = async () => {}, sessionReady = () => true, queue = gameQueue, now = Date.now, policy = GAME_POLICY }) {
     let running = false;
     async function request(id, signal, phase) {
         return queue.run(async () => {
@@ -29,7 +30,7 @@ export function createItemDiscovery({ store, fetchFn, getWebhook, getHeaders = (
             const timeout = AbortSignal.timeout(policy.requestTimeoutMs);
             const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
             let response, body;
-            const diagnostic = { itemId: id, phase, at: new Date(now()).toISOString(), httpStatus: null, route: 'unknown', contentType: null, bytes: null, fingerprint: null, parserCode: null };
+            const diagnostic = { itemId: id, phase, at: new Date(now()).toISOString(), httpStatus: null, route: 'unknown', contentType: null, bytes: null, fingerprint: null, parserCode: null, parserDetail: null };
             const finish = result => ({ ...result, diagnostic: { ...diagnostic, outcome: result.ok ? result.found ? 'found' : 'missing' : result.reason } });
             try {
                 response = await fetchFn(assertItemTooltipUrl(itemTooltipUrl(id)), { method: 'GET', redirect: 'follow', signal: combined, headers: { ...getHeaders(), accept: 'text/html', 'cache-control': 'no-cache' } });
@@ -52,6 +53,8 @@ export function createItemDiscovery({ store, fetchFn, getWebhook, getHeaders = (
             catch (error) {
                 if (!(error instanceof ItemTooltipError)) throw error;
                 diagnostic.parserCode = error.code;
+                diagnostic.parserDetail = error.detail;
+                if (!['game_page', 'huntedcow_page'].includes(diagnostic.route)) await retainUnrecognized(id, body);
                 return finish({ ok: false, reason: 'unrecognized_tooltip' });
             }
         }, signal);
@@ -99,7 +102,7 @@ export function createItemDiscovery({ store, fetchFn, getWebhook, getHeaders = (
                 requests++;
                 current();
                 await store.recordRequest(state.scanId, result.diagnostic);
-                if (!result.ok) log(`[Catalog Items] ID ${id} (${phase}): ${result.reason}; HTTP ${result.diagnostic.httpStatus ?? '-'}; route ${result.diagnostic.route}; parser ${result.diagnostic.parserCode ?? '-'}; bytes ${result.diagnostic.bytes ?? '-'}.`);
+                if (!result.ok) log(`[Catalog Items] ID ${id} (${phase}): ${result.reason}; HTTP ${result.diagnostic.httpStatus ?? '-'}; route ${result.diagnostic.route}; parser ${result.diagnostic.parserCode ?? '-'}; bytes ${result.diagnostic.bytes ?? '-'}${result.diagnostic.parserDetail ? `; ${result.diagnostic.parserDetail}` : ''}.`);
                 return result;
             };
             const probe = async () => {

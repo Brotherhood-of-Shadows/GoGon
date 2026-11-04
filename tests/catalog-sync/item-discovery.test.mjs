@@ -35,7 +35,7 @@ async function setup({ budget = 50, baseline = 17069 } = {}) {
     const store = createItemDiscoveryStore(db, catalog, { now });
     const calls = [], valid = new Set(baseline ? [baseline] : []);
     const env = { webhook: hook, ready: true, intercept: null, logs: [] };
-    const makeWorker = () => createItemDiscovery({ store, now, getWebhook: () => env.webhook, sessionReady: () => env.ready, log: line => env.logs.push(line),
+    const makeWorker = (overrides = {}) => createItemDiscovery({ store, now, getWebhook: () => env.webhook, sessionReady: () => env.ready, log: line => env.logs.push(line),
         getHeaders: () => ({ 'user-agent': 'fixture UA', referer: 'https://www.fallensword.com/index.php' }),
         policy: { ...GAME_POLICY, maxRequestsPerExecution: budget }, queue: { run: fn => fn() },
         fetchFn: async (url, options) => {
@@ -44,7 +44,7 @@ async function setup({ budget = 50, baseline = 17069 } = {}) {
             const id = Number(new URL(url).searchParams.get('item_id'));
             calls.push(id);
             return await env.intercept?.(id, options) ?? response(valid.has(id) ? tooltip(id) : 'Invalid Request');
-        } });
+        }, ...overrides });
     return { db, clock, catalog, store, calls, valid, env, fault, makeWorker, worker: makeWorker() };
 }
 
@@ -170,6 +170,26 @@ test('failures retain exact ID/phase/parser diagnostics across restart without p
     await up(db); await up(db);
     assert.deepEqual((await store.state()).lastRequest, state.lastRequest);
     await assert.rejects(store.recordRequest(state.scanId, { ...state.lastRequest, body: 'must never persist' }), error => error.code === 'invalid');
+});
+
+test('ambiguous tooltip tables persist their structural summary and retain the body only for the owner', async () => {
+    const { env, store, makeWorker } = await setup();
+    const retained = [];
+    const table = epicSample.match(/<table[\s\S]*<\/table>/)[0];
+    const compare = `<body>${table}<div class="compare">${table.replace('Twangy’s Axe', 'Equipped Blade')}</div></body>`;
+    env.intercept = id => id === 17069 ? response(questSample) : response(compare);
+    const discovery = makeWorker({ retainUnrecognized: async (id, body) => { retained.push([id, body]); } });
+    assert.equal((await discovery.run()).reason, 'unrecognized_tooltip');
+    const { lastRequest } = await store.state();
+    assert.equal(lastRequest.parserCode, 'multiple_item_tables');
+    assert.equal(lastRequest.parserDetail, '2 item-tip tables: #1 "Twangy’s Axe" Weapon - Epic in body; #2 "Equipped Blade" Weapon - Epic in body>div.compare');
+    assert.deepEqual(retained, [[17070, compare]]);
+    assert.match(env.logs.at(-1), /multiple_item_tables.*bytes \d+; 2 item-tip tables/);
+    assert.equal((await makeWorker().status()).lastRequest.parserDetail, lastRequest.parserDetail);
+    const { scanId } = await store.state();
+    for (const parserDetail of ['x\u0000', 'x'.repeat(481), 42]) {
+        await assert.rejects(store.recordRequest(scanId, { ...lastRequest, parserDetail }), error => error.code === 'invalid');
+    }
 });
 
 test('game landing and HuntedCow account forms are login responses, never missing IDs or generic parser failures', async () => {

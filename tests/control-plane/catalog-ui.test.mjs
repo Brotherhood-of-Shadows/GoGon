@@ -103,12 +103,13 @@ test('live Guide coverage replaces stale counts and item failure shows the preci
         coverage: { ...SUMMARY.coverage, item: { ok: 99, pending: 7, failed: 3 } },
         guideWorker: { state: 'backoff', kind: 'item', reason: 'browser_verification_failed', nextRetryAt: '2026-11-03T12:05:00.000Z' },
         itemDiscovery: { ...ITEM_DISCOVERY, status: 'backoff', lastError: 'unrecognized_tooltip',
-            lastRequest: { itemId: 17070, phase: 'scan', at: '2026-11-03T12:00:00.000Z', outcome: 'unrecognized_tooltip', httpStatus: 200, route: 'item_tooltip', contentType: 'html', bytes: 123, parserCode: 'tooltip_table_missing' } },
+            lastRequest: { itemId: 17070, phase: 'scan', at: '2026-11-03T12:00:00.000Z', outcome: 'unrecognized_tooltip', httpStatus: 200, route: 'item_tooltip', contentType: 'html', bytes: 123, parserCode: 'tooltip_table_missing', parserDetail: '<img src=x onerror=alert(1)> 2 item-tip tables' } },
     } }) });
     assert.match($('#guide-status').textContent, /99 read, 7 pending, 3 failed/);
     assert.match($('#guide-worker-status').textContent, /browser verification failed/);
     assert.match($('#item-discovery-request').textContent, /item 17070 \(scan\)/);
-    assert.match($('#item-discovery-request').textContent, /parser: tooltip_table_missing/);
+    assert.match($('#item-discovery-request').textContent, /parser: tooltip_table_missing \(<img src=x onerror=alert\(1\)> 2 item-tip tables\)\./);
+    assert.equal($('#item-discovery-request').children.length, 0, 'parser detail renders as text');
     ui.sources[0].handlers.state({ data: JSON.stringify(STATE) });
 });
 

@@ -39,7 +39,7 @@ services:
     tmpfs:
       - /tmp:size=256m,mode=1777
     volumes:
-      - gogon-sso-debug:/var/lib/gogon-sso-debug  # latest failure PNG only; survives restarts
+      - gogon-sso-debug:/var/lib/gogon-sso-debug  # latest SSO failure PNG + unrecognized item tooltip; survives restarts
     cap_drop:
       - ALL
     security_opt:

@@ -110,8 +110,8 @@ export function createItemDiscoveryStore(db, catalog, { now = Date.now } = {}) {
          * @returns {Promise<void>}
          */
         async recordRequest(scanId, request) {
-            const allowed = ['itemId', 'phase', 'at', 'outcome', 'httpStatus', 'route', 'contentType', 'bytes', 'fingerprint', 'parserCode'];
-            if (Object.keys(request).some(key => !allowed.includes(key)) || Buffer.byteLength(canonicalJson(request)) > 1024
+            const allowed = ['itemId', 'phase', 'at', 'outcome', 'httpStatus', 'route', 'contentType', 'bytes', 'fingerprint', 'parserCode', 'parserDetail'];
+            if (Object.keys(request).some(key => !allowed.includes(key)) || Buffer.byteLength(canonicalJson(request)) > 2048
                 || !Number.isInteger(request.itemId) || request.itemId < 1 || request.itemId > MAX_TOOLTIP_ITEM_ID
                 || !['probe', 'scan'].includes(request.phase) || typeof request.at !== 'string' || request.at.length !== 24 || !Number.isFinite(Date.parse(request.at))
                 || !/^[a-z_]{1,40}$/.test(request.outcome) || !['unknown', 'item_tooltip', 'game_page', 'huntedcow_page', 'other'].includes(request.route)
@@ -119,7 +119,8 @@ export function createItemDiscoveryStore(db, catalog, { now = Date.now } = {}) {
                 || ![null, 'html', 'json', 'text', 'other'].includes(request.contentType)
                 || request.bytes !== null && (!Number.isSafeInteger(request.bytes) || request.bytes < 0)
                 || request.fingerprint !== null && !/^[a-f0-9]{64}$/.test(request.fingerprint)
-                || request.parserCode !== null && !/^[a-z_]{1,40}$/.test(request.parserCode)) throw invalid('Invalid item request metadata.');
+                || request.parserCode !== null && !/^[a-z_]{1,40}$/.test(request.parserCode)
+                || request.parserDetail != null && (typeof request.parserDetail !== 'string' || request.parserDetail.length > 480 || /\p{C}/u.test(request.parserDetail))) throw invalid('Invalid item request metadata.');
             await db.query('UPDATE catalog_item_discovery SET last_request = ? WHERE id = 1 AND enabled = 1 AND scan_id = ?', [canonicalJson(request), scanId]);
         },
         /** Projects provisional item data and persists its notification/cursor in the same commit.

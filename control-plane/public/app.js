@@ -568,7 +568,7 @@ function renderItemDiscoveryState(data) {
     document.getElementById('item-discovery-run').disabled = !data.enabled || !data.webhookConfigured || !data.recommendedStartId;
     const request = data.lastRequest;
     document.getElementById('item-discovery-request').textContent = request
-        ? `Last response: item ${request.itemId} (${request.phase === 'probe' ? 'known-item check' : 'scan'}), ${fmtTime(request.at)}; ${request.outcome}; HTTP ${request.httpStatus ?? '-'}; ${request.route}; ${request.contentType ?? '-'}; ${request.bytes ?? '-'} bytes${request.parserCode ? `; parser: ${request.parserCode}` : ''}.`
+        ? `Last response: item ${request.itemId} (${request.phase === 'probe' ? 'known-item check' : 'scan'}), ${fmtTime(request.at)}; ${request.outcome}; HTTP ${request.httpStatus ?? '-'}; ${request.route}; ${request.contentType ?? '-'}; ${request.bytes ?? '-'} bytes${request.parserCode ? `; parser: ${request.parserCode}` : ''}${request.parserDetail ? ` (${request.parserDetail})` : ''}.`
         : 'No request details recorded yet.';
     const changed = itemDiscoveryTotal !== null && itemDiscoveryTotal !== data.discoveredTotal;
     itemDiscoveryTotal = data.discoveredTotal;
