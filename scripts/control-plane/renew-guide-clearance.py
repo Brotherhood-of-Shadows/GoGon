@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 import nodriver
-from challenge_browser import click_verification
+from challenge_browser import verify_until
 from guide_browser_environment import prepare_browser_environment
 
 
@@ -17,18 +17,12 @@ GUIDE_URL = "https://guide.fallensword.com/index.php?cmd=items&index=0"
 GUIDE_LINK = re.compile(r'<a\b[^>]*href=["\'][^"\']*index\.php\?cmd=', re.I)
 CLEARANCE = re.compile(r"^[A-Za-z0-9._-]{1,4096}$")
 PROXY = re.compile(r"^socks5://127\.0\.0\.1:\d{1,5}$")
+# Polling budget for the shared checkbox loop; the Guide shows the same widget as HuntedCow.
+VERIFICATION_SECONDS = 70
 
 
 async def guide_is_loaded(tab):
     return bool(GUIDE_LINK.search(await tab.get_content()))
-
-
-async def wait_for_guide(tab, seconds):
-    for _ in range(seconds // 2):
-        if await guide_is_loaded(tab):
-            return True
-        await asyncio.sleep(2)
-    return await guide_is_loaded(tab)
 
 
 async def renew():
@@ -59,13 +53,8 @@ async def renew():
             sandbox=False if os.name == "posix" else True,
         )
         tab = await browser.get(GUIDE_URL)
-        if not await wait_for_guide(tab, 8):
-            for _ in range(2):
-                await click_verification(tab, profile_directory)
-                if await wait_for_guide(tab, 35):
-                    break
-            else:
-                raise TimeoutError("Guide verification did not reach guide content")
+        await verify_until(tab, profile_directory, lambda: guide_is_loaded(tab), VERIFICATION_SECONDS,
+                           not_reached="Guide verification did not reach guide content")
 
         cookies = await browser.cookies.get_all()
         clearance = next((cookie.value for cookie in cookies if cookie.name == "cf_clearance"

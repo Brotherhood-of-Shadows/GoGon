@@ -39,7 +39,6 @@ test('SSO browser failures identify safe actionable reasons without exposing coo
     [{ code: 1, stderr: "ModuleNotFoundError: No module named 'nodriver'" }, 'SSO_BROWSER_DEPENDENCY_MISSING'],
     [{ code: 1, stderr: 'xvfb-run: error: Xvfb failed to start' }, 'SSO_DISPLAY_FAILED'],
     [{ code: 1, stderr: 'TimeoutError: Verification checkbox did not appear' }, 'SSO_CHECKBOX_MISSING'],
-    [{ code: 1, stderr: 'BrowserOperationTimeout: Browser label lookup exceeded hard deadline' }, 'SSO_BROWSER_LOOKUP_TIMEOUT'],
     [{ code: 1, stderr: 'TimeoutError: HuntedCow verification did not reach the account form' }, 'SSO_ACCOUNT_PAGE_TIMEOUT'],
     [{ code: 1, stderr: 'ValueError: HuntedCow verification produced no usable clearance' }, 'SSO_CLEARANCE_MISSING'],
     [{ code: 1, stderr: 'GG_GUIDE_BROWSER_PROXY must be a local SOCKS5 endpoint' }, 'SSO_PROXY_INVALID'],
@@ -113,8 +112,8 @@ test('SSO streams only safe operation lines and preserves the inner interrupted 
 test('hard-killed helpers identify the unmatched operation; successful helpers still stream diagnostics and validate cookies', async () => {
   const logs = [];
   await assert.rejects(renewSsoClearance({ log: line => logs.push(line), execFileFn: async () => {
-    throw Object.assign(new Error('fixture process timeout'), { killed: true, signal: 'SIGTERM', stderr: '[SSO_DEBUG:verification:start:8000]\n[SSO_DEBUG:label_lookup_en:start:8002]\n' });
-  } }), error => error.code === 'SSO_PROCESS_TIMEOUT' && /Interrupted operation: English label lookup/.test(error.message));
+    throw Object.assign(new Error('fixture process timeout'), { killed: true, signal: 'SIGTERM', stderr: '[SSO_DEBUG:verification:start:8000]\n[SSO_DEBUG:image_click:start:8002]\n' });
+  } }), error => error.code === 'SSO_PROCESS_TIMEOUT' && /Interrupted operation: image-based click \(\+8002 ms\)/.test(error.message));
   const result = await renewSsoClearance({ log: line => logs.push(line), execFileFn: async () => ({ stdout: JSON.stringify(credentials), stderr: '[SSO_DEBUG:user_agent:done:25000]\nprivate-cookie-value\n' }) });
   assert.deepEqual(result, credentials);
   assert.equal(logs.at(-1), '[GoGon_SSO_DEBUG] +25000ms reading browser identity: done');

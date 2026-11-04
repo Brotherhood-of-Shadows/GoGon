@@ -1,23 +1,33 @@
-"""Shared visual verification interaction for the Guide and HuntedCow browsers."""
+"""Shared Cloudflare checkbox verification for the Guide and HuntedCow browsers."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import cv2
-from browser_debug import BrowserOperationTimeout, Reporter, debug_step, quiet_report
+from browser_debug import Reporter, debug_step, quiet_report
 
 
-LABELS = ("Verify you are human", "Confirme que é humano")
 # Each template is centred on the checkbox. The light one is cut from this container's own
-# Chromium rendering of the HuntedCow widget (its fonts differ from desktop browsers); the dark
-# one is the original Guide capture. Inverted contrast never correlates, so both are needed.
+# Chromium rendering of the widget, which the Guide and HuntedCow share (its fonts differ from
+# desktop browsers); the dark one is the original Guide capture. Inverted contrast never
+# correlates, so both are tried.
 CHECKBOX_TEMPLATES = (
     Path(__file__).with_name("sso-checkbox-template.png"),
     Path(__file__).with_name("guide-checkbox-template.png"),
 )
-CHECKBOX_TEMPLATE = CHECKBOX_TEMPLATES[1]
 # A visible checkbox scores 1.0 against the light template; the "Verifying..." spinner ~0.6.
 MATCH_THRESHOLD = 0.75
+# The widget first shows "Verifying..." (over 12 s on the VPS) before its checkbox appears, and
+# may also pass on its own, so poll both instead of judging one early screenshot. Never search
+# page or frame text: that lookup stalled while the widget was still verifying.
+POLL_SECONDS = 1.5
+MAX_CLICKS = 2
+AFTER_CLICK_SECONDS = 20
+
+
+def _no_stage(stage: str) -> None:
+    """Callers without stage reporting stay quiet."""
 
 
 async def locate_checkbox(tab, profile_directory: Path, *, report: Reporter = quiet_report):
@@ -47,7 +57,7 @@ async def locate_checkbox(tab, profile_directory: Path, *, report: Reporter = qu
 
 
 async def click_checkbox_image(tab, profile_directory: Path, *, report: Reporter = quiet_report) -> bool:
-    """Click the checkbox when a template matches; never performs a DOM/frame text lookup."""
+    """Click the checkbox when a template matches; return whether a click happened."""
     point = await locate_checkbox(tab, profile_directory, report=report)
     if point is None:
         return False
@@ -56,28 +66,37 @@ async def click_checkbox_image(tab, profile_directory: Path, *, report: Reporter
     return True
 
 
-async def click_verification(tab, profile_directory: Path, *, report: Reporter = quiet_report) -> None:
-    """Click the visible verification checkbox by image, falling back to its label text."""
-    if await click_checkbox_image(tab, profile_directory, report=report):
-        return
+async def verify_until(tab, profile_directory: Path, is_loaded: Callable[[], Awaitable[bool]], seconds: float, *,
+                       not_reached: str, report: Reporter = quiet_report,
+                       stage: Callable[[str], None] = _no_stage) -> bool:
+    """Wait until ``is_loaded`` holds, clicking the checkbox by image whenever it is visible.
 
-    for label in LABELS:
-        operation = "label_lookup_en" if label == LABELS[0] else "label_lookup_pt"
-        with debug_step(operation, report):
-            lookup_seconds = 10 if label == LABELS[0] else 3
-            # nodriver's timeout only bounds its polling loop; an awaited frame/CDP call can
-            # stall before the loop checks elapsed time. Allow two seconds for its final poll,
-            # then abort the attempt instead of consuming the whole browser-helper deadline.
-            deadline = asyncio.timeout(lookup_seconds + 2)
-            try:
-                async with deadline:
-                    element = await tab.find(label, timeout=lookup_seconds)
-            except TimeoutError as error:
-                if deadline.expired():
-                    raise BrowserOperationTimeout("Browser label lookup exceeded hard deadline") from error
-                raise
-        if element:
-            with debug_step("label_click", report):
-                await element.mouse_click()
-            return
+    Raises TimeoutError("Verification checkbox did not appear") when no checkbox was ever
+    clicked, or TimeoutError(not_reached) when clicks did not lead to the protected page.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + seconds
+    clicks = 0
+    while True:
+        if await is_loaded():
+            return True
+        if loop.time() >= deadline:
+            break
+        if clicks < MAX_CLICKS:
+            stage("verification")
+            with debug_step("verification", report):
+                clicked = await click_checkbox_image(tab, profile_directory, report=report)
+            if clicked:
+                clicks += 1
+                stage("account_wait_after_verification")
+                settle = loop.time() + max(2.0, min(AFTER_CLICK_SECONDS, deadline - loop.time()))
+                while loop.time() < settle:
+                    await asyncio.sleep(POLL_SECONDS)
+                    if await is_loaded():
+                        return True
+                stage("account_wait")
+                continue
+        await asyncio.sleep(POLL_SECONDS)
+    if clicks:
+        raise TimeoutError(not_reached)
     raise TimeoutError("Verification checkbox did not appear")

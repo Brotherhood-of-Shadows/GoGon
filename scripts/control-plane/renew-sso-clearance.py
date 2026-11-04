@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 from typing import Literal
 
 import nodriver
-from challenge_browser import click_checkbox_image
+from challenge_browser import verify_until
 from guide_browser_environment import prepare_browser_environment
 from browser_debug import Reporter, debug_step, quiet_report
 
@@ -26,12 +26,8 @@ COOKIE_NAMES = {"cf_clearance", "hcs_session_key"}
 COOKIE_DOMAINS = {"huntedcow.com", ".huntedcow.com", "account.huntedcow.com"}
 CHALLENGE_PAGE = re.compile(r"/cdn-cgi/challenge-platform/|cf[_-]chl[_-]|<title>\s*Just a moment", re.I)
 FAILURE_IMAGE_DIRECTORY = Path('/var/lib/gogon-sso-debug')
-# The widget first shows "Verifying..." (over 12 s on the VPS) before its checkbox appears, and
-# it may also pass on its own. Poll both instead of judging a single early screenshot.
+# Polling budget for the shared checkbox loop (challenge_browser.verify_until).
 VERIFICATION_SECONDS = 70
-POLL_SECONDS = 1.5
-MAX_CLICKS = 2
-AFTER_CLICK_SECONDS = 20
 
 
 def preserve_failure_image(profile_directory: Path, report: Reporter) -> None:
@@ -109,44 +105,12 @@ async def account_is_loaded(tab, report: Reporter = quiet_report) -> bool:
     return loaded
 
 
-async def wait_for_account(tab, seconds: int, report: Reporter = quiet_report) -> bool:
-    """Wait for an account page without treating the challenge page as success."""
-    for _ in range(seconds // 2):
-        if await account_is_loaded(tab, report):
-            return True
-        await asyncio.sleep(2)
-    return await account_is_loaded(tab, report)
-
-
 async def verify_until_account(tab, profile_directory: Path, seconds: float,
                                report: Reporter = quiet_report) -> bool:
-    """Wait for the account form, clicking the checkbox by image whenever it is visible.
-
-    Raises TimeoutError naming whether the checkbox never appeared or clicking did not pass.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + seconds
-    clicks = 0
-    while True:
-        if await account_is_loaded(tab, report):
-            return True
-        if loop.time() >= deadline:
-            break
-        if clicks < MAX_CLICKS:
-            report_stage("verification")
-            with debug_step("verification", report):
-                clicked = await click_checkbox_image(tab, profile_directory, report=report)
-            if clicked:
-                clicks += 1
-                report_stage("account_wait_after_verification")
-                if await wait_for_account(tab, max(2, min(AFTER_CLICK_SECONDS, int(deadline - loop.time()))), report):
-                    return True
-                report_stage("account_wait")
-                continue
-        await asyncio.sleep(POLL_SECONDS)
-    if clicks:
-        raise TimeoutError("HuntedCow verification did not reach the account form")
-    raise TimeoutError("Verification checkbox did not appear")
+    """Reach the HuntedCow account form through the shared checkbox polling loop."""
+    return await verify_until(tab, profile_directory, lambda: account_is_loaded(tab, report), seconds,
+                              not_reached="HuntedCow verification did not reach the account form",
+                              report=report, stage=report_stage)
 
 
 async def renew(entry_url: str) -> None:

@@ -49,13 +49,14 @@ cookies, credentials, page content or token-bearing URLs. A successful manual lo
 general outage less likely but does not establish that the VPS browser can complete verification.
 Browser recovery also streams `[GoGon_SSO_DEBUG]` lines with elapsed milliseconds and `start`,
 `done`, `interrupted`, or `observed` events. These cover screenshot capture/read, image matching,
-label lookup, clicks, page reads, navigation and cleanup. The last `start` without a `done`, or
+clicks, page reads, navigation and cleanup. The last `start` without a `done`, or
 the first interrupted inner operation, locates a stalled call. Page observations carry their own
 timestamps and can precede a stall; they are not a screenshot of the page at timeout. When reporting
 a failure, include the debug lines from that login attempt and its final error. No debug flag is needed.
-HuntedCow's Cloudflare widget is light-themed and first shows "Verifying..." (more than 12 seconds
-on the VPS) before its checkbox appears; it may also pass without a click. For up to 70 seconds the
-SSO helper polls every 1.5 seconds: it returns as soon as the account form loads, otherwise it
+HuntedCow and the Guide show the same light-themed Cloudflare widget. It first shows
+"Verifying..." (more than 12 seconds on the VPS) before its checkbox appears; it may also pass
+without a click. For up to 70 seconds both browser helpers poll every 1.5 seconds through the
+shared `challenge_browser.verify_until`: it returns as soon as the account form (or Guide content) loads, otherwise it
 screenshots the page and clicks the checkbox once an image template matches (at most twice). It
 never searches the page or its frames by label text, which used to stall while the widget was
 still verifying (`browser_lookup_timeout`). `sso-checkbox-template.png` is cut from this
@@ -64,7 +65,7 @@ dark Guide template never matches the light widget. A visible checkbox scores 1.
 verifying spinner about 0.6, against a 0.75 threshold. `checkbox_missing` now means no checkbox
 appeared within 70 seconds; `account_page_timeout` means clicks did not lead to the account form.
 If Cloudflare changes the widget, replace the template with a crop of the new rendering, centred on
-the checkbox. The Guide renewal keeps its label-text fallback after both templates.
+the checkbox. A Guide renewal that finds no checkbox fails the same way and its lease backs off.
 On a failed SSO attempt, the latest verification screenshot is retained as
 `/var/lib/gogon-sso-debug/last-failure.png`. Compose mounts a private named volume at this path so
 the latest PNG survives container restarts; browser profiles and cookies remain temporary. The
