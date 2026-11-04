@@ -53,19 +53,25 @@ label lookup, clicks, page reads, navigation and cleanup. The last `start` witho
 the first interrupted inner operation, locates a stalled call. Page observations carry their own
 timestamps and can precede a stall; they are not a screenshot of the page at timeout. When reporting
 a failure, include the debug lines from that login attempt and its final error. No debug flag is needed.
-`browser_lookup_timeout` identifies a DOM/frame lookup that overran its own polling timeout. An
-outer deadline bounds these calls to the configured lookup duration plus two seconds (12 seconds
-for English, 5 for Portuguese), then aborts the attempt and cleans up the temporary browser. This
-prevents an unresponsive browser command from spending the full 90-second helper budget; it does
-not establish that verification will succeed on the next attempt.
-On a failed SSO attempt, the existing screenshot taken before the lookup is retained as
+HuntedCow's Cloudflare widget is light-themed and first shows "Verifying..." (more than 12 seconds
+on the VPS) before its checkbox appears; it may also pass without a click. For up to 70 seconds the
+SSO helper polls every 1.5 seconds: it returns as soon as the account form loads, otherwise it
+screenshots the page and clicks the checkbox once an image template matches (at most twice). It
+never searches the page or its frames by label text, which used to stall while the widget was
+still verifying (`browser_lookup_timeout`). `sso-checkbox-template.png` is cut from this
+container's own Chromium rendering of the widget: its fonts differ from a desktop browser, and the
+dark Guide template never matches the light widget. A visible checkbox scores 1.0 and the
+verifying spinner about 0.6, against a 0.75 threshold. `checkbox_missing` now means no checkbox
+appeared within 70 seconds; `account_page_timeout` means clicks did not lead to the account form.
+If Cloudflare changes the widget, replace the template with a crop of the new rendering, centred on
+the checkbox. The Guide renewal keeps its label-text fallback after both templates.
+On a failed SSO attempt, the latest verification screenshot is retained as
 `/var/lib/gogon-sso-debug/last-failure.png`. Compose mounts a private named volume at this path so
 the latest PNG survives container restarts; browser profiles and cookies remain temporary. The
-image is from before the interaction, not the page at timeout. Only the latest bounded PNG is kept,
+image is the last poll before the failure, not necessarily the page at timeout. Only the latest bounded PNG is kept,
 with owner-only file permissions; failures to save it never replace the original login error.
-The capture may be JPEG despite its temporary `.png` filename: nodriver 0.50.3 defaults to JPEG.
-The diagnostic saver detects the actual bytes and converts a JPEG copy into a real PNG after
-failure. The original capture used by the helper is preserved. Save-result logs distinguish a
+Captures are requested as PNG; nodriver 0.50.3 otherwise defaults to JPEG. The diagnostic saver
+still detects the actual bytes and converts a JPEG copy into a real PNG after failure. The original capture used by the helper is preserved. Save-result logs distinguish a
 missing source, unsupported/undecodable image, size limit, permission problem, read-only directory,
 and other file I/O failures.
 After the log says `failure screenshot saved`, copy it from the VPS project directory:
@@ -76,7 +82,7 @@ docker compose run --rm --no-deps -T --entrypoint cat gogon \
 ```
 
 This uses a short-lived file-copy container to read the volume during the main container's restart
-loop. Inspect that image to see what the browser displayed at the start of the lookup. A successfully
+loop. Inspect that image to see what the browser displayed at its last poll. A successfully
 completed screenshot or image-match operation does not establish that a verification control was
 found or that the browser completed verification.
 

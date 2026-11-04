@@ -15,7 +15,7 @@ const DEBUG_OPERATIONS = Object.freeze({
   cookies: 'reading browser result', user_agent: 'reading browser identity', browser_stop: 'browser shutdown',
   profile_cleanup: 'temporary profile cleanup', page_challenge: 'page observed: challenge',
   page_account_form: 'page observed: account form', page_other: 'page observed: other',
-  failure_image_saved: 'failure screenshot saved at /var/lib/gogon-sso-debug/last-failure.png (captured before lookup)',
+  failure_image_saved: 'failure screenshot saved at /var/lib/gogon-sso-debug/last-failure.png (latest verification capture)',
   failure_image_unavailable: 'failure screenshot unavailable',
   failure_image_source_missing: 'failure screenshot missing from the temporary profile',
   failure_image_size_invalid: 'failure screenshot exceeds the size limits',

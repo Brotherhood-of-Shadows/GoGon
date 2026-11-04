@@ -32,18 +32,15 @@ class Browser:
 async def start(**kwargs):
     return Browser()
 async def verification(tab, profile, *, report):
-    await helper.account_is_loaded(tab, report)
     (profile / 'challenge.png').write_bytes(b'\\x89PNG\\r\\n\\x1a\\nfixture image')
     (profile / 'cookies.json').write_text('private-cookie-fixture')
-    raise TimeoutError('fixture verification timeout')
+    return False
 sys.modules['nodriver'] = types.SimpleNamespace(start=start)
-sys.modules['challenge_browser'] = types.SimpleNamespace(click_verification=verification)
+sys.modules['challenge_browser'] = types.SimpleNamespace(click_checkbox_image=verification)
 sys.modules['guide_browser_environment'] = types.SimpleNamespace(prepare_browser_environment=lambda profile: None)
 spec = importlib.util.spec_from_file_location('sso_fixture', 'scripts/control-plane/renew-sso-clearance.py')
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
-async def no_account(tab, seconds, report):
-    return False
 async def run():
     global mode
     await helper.renew('https://huntedcow.com/auth?game=6')
@@ -57,11 +54,12 @@ async def run():
         raise AssertionError('navigation timeout was swallowed')
     mode = 'verification'
     print('CASE:verification', file=sys.stderr)
-    helper.wait_for_account = no_account
+    helper.VERIFICATION_SECONDS = 0.05
+    helper.POLL_SECONDS = 0.01
     try:
         await helper.renew('https://huntedcow.com/auth?game=6')
-    except TimeoutError:
-        pass
+    except TimeoutError as error:
+        assert str(error) == 'Verification checkbox did not appear', error
     else:
         raise AssertionError('verification timeout was swallowed')
     assert stopped == ['success', 'navigation', 'verification'], stopped
@@ -128,7 +126,8 @@ class Element:
     async def mouse_click(self):
         await asyncio.Future()
 class Tab:
-    async def save_screenshot(self, path):
+    async def save_screenshot(self, path, format='jpeg'):
+        assert format == 'png', format
         if mode == 'screenshot':
             await asyncio.Future()
     async def find(self, label, timeout):
@@ -187,4 +186,73 @@ asyncio.run(run())
   const actual = spawnSync('python3', ['-c', script], { encoding: 'utf8', timeout: 5000 });
   assert.equal(actual.status, 0, actual.stderr || actual.error?.message);
   assert.equal(actual.stdout, '');
+});
+
+test('SSO verification polls through "Verifying...", clicks only a visible checkbox and never uses label lookup', () => {
+  // Doubles only: no Chromium, network or credentials. Each scenario lists what every poll observes.
+  const script = `
+import asyncio, importlib.util, sys, types
+sys.dont_write_bytecode = True
+sys.path.insert(0, 'scripts/control-plane')
+state = {}
+class Tab:
+    async def get_content(self):
+        state['polls'] += 1
+        return '<form id="m-login-form"></form>' if state['polls'] >= state['account_at'] else '<title>Just a moment...</title>'
+    async def find(self, *args, **kwargs):
+        raise AssertionError('SSO verification must not search page text')
+async def click(tab, profile, *, report):
+    state['looks'] += 1
+    if state['looks'] >= state['checkbox_at']:
+        state['clicks'] += 1
+        return True
+    return False
+sys.modules['nodriver'] = types.SimpleNamespace()
+sys.modules['challenge_browser'] = types.SimpleNamespace(click_checkbox_image=click)
+sys.modules['guide_browser_environment'] = types.SimpleNamespace(prepare_browser_environment=lambda profile: None)
+spec = importlib.util.spec_from_file_location('sso_fixture', 'scripts/control-plane/renew-sso-clearance.py')
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+helper.POLL_SECONDS = 0
+helper.asyncio = types.SimpleNamespace(get_running_loop=asyncio.get_running_loop, sleep=lambda seconds: asyncio.sleep(0))
+async def scenario(account_at, checkbox_at, seconds=0.2):
+    state.update(polls=0, looks=0, clicks=0, account_at=account_at, checkbox_at=checkbox_at)
+    try:
+        result = await helper.verify_until_account(Tab(), None, seconds)
+    except TimeoutError as error:
+        result = str(error)
+    return result, state['clicks']
+async def run():
+    never = 10**9
+    assert await scenario(account_at=4, checkbox_at=never) == (True, 0), 'passes on its own after verifying'
+    assert await scenario(account_at=5, checkbox_at=3) == (True, 1), 'clicks once the checkbox appears'
+    assert await scenario(account_at=never, checkbox_at=never) == ('Verification checkbox did not appear', 0)
+    assert await scenario(account_at=never, checkbox_at=1, seconds=0.05) == ('HuntedCow verification did not reach the account form', 2)
+asyncio.run(run())
+`;
+  const actual = spawnSync('python3', ['-c', script], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(actual.status, 0, actual.stderr || actual.error?.message);
+});
+
+const hasOpenCv = spawnSync('python3', ['-c', 'import cv2'], { encoding: 'utf8' }).status === 0;
+
+test('real HuntedCow widget captures: light template finds the checkbox and ignores the verifying spinner', { skip: !hasOpenCv && 'OpenCV is only installed in the container image' }, () => {
+  // Frames from the production image's Chromium: a visible checkbox and the VPS "Verifying..." state.
+  const script = `
+import asyncio, shutil, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, 'scripts/control-plane')
+import challenge_browser
+class Tab:
+    def __init__(self, frame): self.frame = frame
+    async def save_screenshot(self, path, format='jpeg'): shutil.copyfile(self.frame, path)
+async def run():
+    with tempfile.TemporaryDirectory() as directory:
+        found = await challenge_browser.locate_checkbox(Tab('tests/auth-session/fixtures/sso-widget-checkbox.png'), Path(directory))
+        assert found and abs(found[0] - 213) <= 3 and abs(found[1] - 337) <= 3, found
+        assert await challenge_browser.locate_checkbox(Tab('tests/auth-session/fixtures/sso-widget-verifying.png'), Path(directory)) is None
+asyncio.run(run())
+`;
+  const actual = spawnSync('python3', ['-c', script], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(actual.status, 0, actual.stderr || actual.error?.message);
 });
