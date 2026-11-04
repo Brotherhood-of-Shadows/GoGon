@@ -90,7 +90,17 @@ jobs:
           /opt/gogon-guide-python/bin/python /app/scripts/control-plane/smoke-guide-browser.py
       - name: Bundled MySQL starts healthy with the compose settings
         run: docker compose up --detach --wait --wait-timeout 180 mysql
+      # Read the running container's actual host bindings. `docker compose port` output varies by
+      # Compose version (some print a placeholder such as ":0" for an unpublished port), so it is
+      # not used here.
       - name: The mysql service publishes no host port
-        run: test -z "$(docker compose port mysql 3306 2>/dev/null || true)"
+        run: |
+          container="$(docker compose ps -q mysql)"
+          test -n "$container"
+          bindings="$(docker port "$container")"
+          if [ -n "$bindings" ]; then
+            echo "mysql publishes host ports: $bindings"
+            exit 1
+          fi
       - if: always()
         run: docker compose down --volumes
