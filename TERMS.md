@@ -1,6 +1,6 @@
 # GoGon Terms of Use
 
-Effective date: 3 November 2026
+Effective date: 3 November 2026 · Last updated: 4 November 2026
 
 These Terms govern your use of the GoGon service operated by **Brotherhood of Shadows**
 (<https://github.com/Brotherhood-of-Shadows>), "we" or "us": the GoGon Discord bot, its slash
@@ -74,7 +74,7 @@ where it applies.
 The GoGon software is free software licensed under the GNU Affero General Public License, version 3
 or any later version (see [`LICENSE`](LICENSE) and [`NOTICE.md`](NOTICE.md)). As that license
 requires, the Corresponding Source of the version we run is available from Brotherhood of Shadows on
-GitHub (<https://github.com/Brotherhood-of-Shadows>). These Terms govern the use of the service we
+GitHub (<https://github.com/Brotherhood-of-Shadows>); the `/about` command links to it. These Terms govern the use of the service we
 host; they do not restrict any right the license gives you over the software.
 
 ## 10. Changes to these Terms

@@ -168,10 +168,19 @@ proxy you control), set `GG_CONTROL_COOKIE_SECURE=1`.
 catalog; it never contacts guide.fallensword.com or the game. Typing in `name` autocompletes up to 25
 matches. Replies are visible only to the person who asked: menus open related entries (drops, realms,
 creatures, quests, relics, stairways, set pieces) in the same message, quests have stage buttons, and
-**Share** posts the current card to the channel without menus or mentions. Entries the catalog marks
+**Share** posts the whole card to the channel without mentions: its menus and quest stage buttons
+stay, so anyone can page through every stage or follow a link. Using them on the shared post opens a
+private card for that person; the shared post itself never changes. Entries the catalog marks
 incomplete carry a badge with the same reason wording as the Catalog tab. Menus keep working after a
 restart. A database outage produces an ephemeral "Guide data is unavailable right now" and one
 `[guide]` error line; slow or failed autocomplete logs a `[guide]` warning without the typed text.
+
+### Discord `/about`
+
+`/about` replies privately with GoGon's version and its license (GNU AGPL-3.0-or-later), with buttons
+linking the source repository, the Terms of Use, the Privacy Policy and the license text. It is the
+license's network-use source offer for Discord users, so keep the repository public and current with
+what the VPS runs.
 
 ## 6. Catalog (`catalog-sync-v1`)
 

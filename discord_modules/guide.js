@@ -1,8 +1,10 @@
 // discord_modules/guide.js - specs/tasks/2026-11-discord-guide.md (AC-DISC-007)
 // /guide looks entries up in GoGon's own MySQL catalog (catalog/catalogReader.js); it never
 // requests guide.fallensword.com or the game. Replies are ephemeral to the requester; Share posts
-// the current card publicly without components. Every menu and button carries its target in its
-// custom_id or option value, so navigation needs no session state and survives a restart.
+// the whole card publicly with its menus and stage buttons (owner request 2026-11-04). On a shared
+// message those open a private card for whoever clicks, so nobody changes the public post for
+// everyone. Every menu and button carries its target in its custom_id or option value, so
+// navigation needs no session state and survives a restart.
 import { SlashCommandBuilder, MessageFlags, ComponentType, ButtonStyle, escapeMarkdown } from 'discord.js';
 import { WARN, ERR } from '../app_modules/core.js';
 import { getConnection } from '../_gg_data/handler/gg_database.js';
@@ -118,7 +120,8 @@ function fitEmbed(embed) {
 
 /** Renders a card as a Discord message body. Pure: no I/O.
  * @param {object} card catalogReader.card() result.
- * @param {{stage?: number, shared?: boolean}} [options] Quest stage (1-based); shared copies have no components.
+ * @param {{stage?: number, shared?: boolean}} [options] Quest stage (1-based); shared copies keep their
+ *     menus and stage buttons but have no Share button.
  * @returns {{embeds: object[], components: object[]}} Message body.
  */
 export function renderCard(card, { stage = 1, shared = false } = {}) {
@@ -135,8 +138,6 @@ export function renderCard(card, { stage = 1, shared = false } = {}) {
         fields,
         footer: { text: `GoGon catalog • ${LABELS[card.kind]} #${card.id}${shared ? ' • shared from /guide' : ''}` },
     });
-    if (shared) return { embeds: [embed], components: [] };
-
     const components = [];
     for (const key of RELATION_ORDER[card.kind]) {
         const relation = card.relations?.[key];
@@ -158,8 +159,8 @@ export function renderCard(card, { stage = 1, shared = false } = {}) {
     }
     const link = card.kind === 'realm' ? card.masterRealm : ['relic', 'quest'].includes(card.kind) ? card.realm : null;
     if (link?.known) buttons.push({ type: ComponentType.Button, style: ButtonStyle.Secondary, label: truncate(`${LABELS[link.kind]}: ${link.name}`, 80), custom_id: `guide:open:${link.kind}:${link.id}` });
-    buttons.push({ type: ComponentType.Button, style: ButtonStyle.Primary, label: 'Share', custom_id: `guide:share:${card.kind}:${card.id}:${currentStage}` });
-    components.push({ type: ComponentType.ActionRow, components: buttons });
+    if (!shared) buttons.push({ type: ComponentType.Button, style: ButtonStyle.Primary, label: 'Share', custom_id: `guide:share:${card.kind}:${card.id}:${currentStage}` });
+    if (buttons.length) components.push({ type: ComponentType.ActionRow, components: buttons });
     return { embeds: [embed], components };
 }
 
@@ -194,6 +195,8 @@ export function parseGuideCustomId(customId, values = []) {
 }
 
 const ephemeral = body => ({ ...body, flags: MessageFlags.Ephemeral });
+// Only the requester's own ephemeral card is updated in place; anything else (a shared post) is not.
+const onPrivateCard = interaction => Boolean(interaction.message?.flags?.has?.(MessageFlags.Ephemeral));
 const noMentions = { allowedMentions: { parse: [] } };
 
 function withDeadline(promise, ms) {
@@ -272,7 +275,8 @@ export function createGuideHandlers({
             await interaction.reply({ ...renderCard(card, { stage: parsed.stage, shared: true }), ...noMentions });
             return interaction.followUp(ephemeral({ content: MESSAGES.shared }));
         }
-        return interaction.update({ content: '', ...renderCard(card, { stage: parsed.stage }) });
+        const body = renderCard(card, { stage: parsed.stage });
+        return onPrivateCard(interaction) ? interaction.update({ content: '', ...body }) : interaction.reply(ephemeral(body));
     }
 
     return { autocomplete, command, component };

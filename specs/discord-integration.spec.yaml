@@ -4,15 +4,21 @@
 spec:
   id: "discord-integration-v1"
   status: draft
-  version: "1.7.0"
+  version: "1.8.0"
   created: "2026-09-22"
-  updated: "2026-11-03"
+  updated: "2026-11-04"
 
   version_policy:
     sync_group: "api-surface"
     depends_on: ["business-domain", "security"]
 
   changelog:
+    - version: "1.8.0"
+      date: "2026-11-04"
+      changes:
+        - "Owner request 2026-11-04: /guide Share posts the whole navigable card (relation menus, quest stage buttons, realm/master-realm button; no Share button) instead of a component-free copy. On a shared post those components open a private card for the member who clicks, and the post itself never changes. AC-DISC-007 updated (task spec AC-5)."
+        - "/about (discord_modules/about.js) replies ephemerally with the version, the AGPL-3.0-or-later notice and link buttons to the source repository, TERMS.md, PRIVACY.md and LICENSE: the AGPL section 13 source offer for Discord users. AC-DISC-001 now registers /about."
+        - "RULE-002: quickBuff no longer logs the game's quickbuff HTML when the report is missing or unrecognised; it logs the hint, response length and message count."
     - version: "1.7.0"
       date: "2026-11-03"
       changes:
@@ -78,8 +84,8 @@ domain:
     scenarios:
     - given: Valid GG_DISCORD_TOKEN, GG_DISCORD_APP_ID, and GG_DISCORD_GUILD_ID in .env
       when: setupDiscord() is called during startup
-      then: Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, and /guide with Discord REST API and binds interaction
-        event listeners, including /guide autocomplete and guide components
+      then: Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, /guide, and /about with Discord REST API and binds
+        interaction event listeners, including /guide autocomplete and guide components
     - given: Discord credentials missing from .env
       when: setupDiscord() is evaluated in app.mjs
       then: Logs warning and skips bot initialization without preventing scraper engine execution
@@ -148,8 +154,10 @@ domain:
         an exact name match opens directly, several open a picker, none offers up to 5 suggestions
     - given: A member uses a card menu, stage button or Share
       when: The component interaction arrives, possibly after a restart
-      then: Menus and stages update the same ephemeral message; Share posts the card publicly without components
-        or mentions; a malformed custom_id expires and a deleted entry is reported, both ephemerally
+      then: On the requester's ephemeral card, menus and stages update that message; Share posts the whole card
+        publicly with its menus and stage buttons but no Share button and no mentions; on a shared post, menus and
+        stages reply with a private card and leave the post unchanged; a malformed custom_id expires and a deleted
+        entry is reported, both ephemerally
     - given: The catalog database is unavailable
       when: Any /guide interaction runs
       then: Replies ephemerally that guide data is unavailable and logs one ERR with operation and kind only; no
@@ -227,7 +235,7 @@ acceptance_criteria:
     description: "Slash command registration and command routing"
     given: "Valid GG_DISCORD_TOKEN, GG_DISCORD_APP_ID, and GG_DISCORD_GUILD_ID in .env"
     when: "setupDiscord() is called during startup"
-    then: "Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, and /guide with Discord REST API and binds interaction event listeners, including /guide autocomplete and guide components"
+    then: "Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, /guide, and /about with Discord REST API and binds interaction event listeners, including /guide autocomplete and guide components"
     error_cases:
       - given: "Discord credentials missing from .env"
         when: "setupDiscord() is evaluated in app.mjs"

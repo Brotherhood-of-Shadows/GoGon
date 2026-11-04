@@ -54,6 +54,10 @@ mock.module(new URL('../../discord_modules/guide.js', import.meta.url).href, {
         handleGuideComponent: handler('guide:component'),
     },
 });
+const { aboutCommand } = await import('../../discord_modules/about.js');
+mock.module(new URL('../../discord_modules/about.js', import.meta.url).href, {
+    namedExports: { aboutCommand, handleAboutCommand: handler('about') },
+});
 
 const { setupDiscord } = await import('../../discordBot.mjs');
 const { Events, Routes } = realDiscord;
@@ -84,7 +88,7 @@ beforeEach(() => {
     lastClient = null;
 });
 
-test('AC-DISC-001: registers /buff, /bebuff, /checkbuffs, /gvgcooldown and /guide on the guild route and logs in', async () => {
+test('AC-DISC-001: registers /buff, /bebuff, /checkbuffs, /gvgcooldown, /guide and /about on the guild route and logs in', async () => {
     const client = await setupDiscord(TOKEN, APP_ID, GUILD_ID);
     assert.equal(client, lastClient);
     assert.equal(rest.token, TOKEN);
@@ -93,7 +97,7 @@ test('AC-DISC-001: registers /buff, /bebuff, /checkbuffs, /gvgcooldown and /guid
 
     const [{ route, body }] = rest.puts;
     assert.equal(route, Routes.applicationGuildCommands(APP_ID, GUILD_ID));
-    assert.deepEqual(body.map(c => c.name), ['buff', 'bebuff', 'checkbuffs', 'gvgcooldown', 'guide']);
+    assert.deepEqual(body.map(c => c.name), ['buff', 'bebuff', 'checkbuffs', 'gvgcooldown', 'guide', 'about']);
     const options = Object.fromEntries(body.map(c => [c.name, (c.options ?? []).map(o => [o.name, o.required])]));
     assert.deepEqual(options, {
         buff: [['target', true], ['buffs', true]],
@@ -101,6 +105,7 @@ test('AC-DISC-001: registers /buff, /bebuff, /checkbuffs, /gvgcooldown and /guid
         checkbuffs: [['username', true]],
         gvgcooldown: [],
         guide: ['item', 'creature', 'realm', 'master-realm', 'relic', 'quest'].map(name => [name, undefined]),
+        about: [],
     });
     const guide = body.find(c => c.name === 'guide');
     assert.ok(guide.options.every(sub => sub.options.length === 1 && sub.options[0].name === 'name' && sub.options[0].required && sub.options[0].autocomplete));
@@ -114,13 +119,13 @@ test('AC-DISC-001: the client binds one interaction listener and one error liste
 
 test('AC-DISC-001: each slash command routes to its own handler', async () => {
     await setupDiscord(TOKEN, APP_ID, GUILD_ID);
-    for (const name of ['buff', 'bebuff', 'checkbuffs', 'gvgcooldown', 'guide']) {
+    for (const name of ['buff', 'bebuff', 'checkbuffs', 'gvgcooldown', 'guide', 'about']) {
         const interaction = chatInput(name);
         await dispatch(interaction);
         assert.equal(calls.at(-1).name, name);
         assert.equal(calls.at(-1).interaction, interaction);
     }
-    assert.equal(calls.length, 5);
+    assert.equal(calls.length, 6);
 });
 
 test('AC-DISC-007: /guide autocomplete and guide: components reach the guide; other components and unknown commands reach nothing', async () => {

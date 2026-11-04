@@ -11,9 +11,11 @@ Target files: discord_modules/guide.js, discordBot.mjs, specs/discord-integratio
 A guild member types `/guide item name:` (or creature, realm, master-realm, relic, quest), picks an
 autocompleted entry, and privately sees a card built from GoGon's MySQL catalog. Menus on the card
 open related entries in place (item → dropped by → creature → realms → quests/relics), and **Share**
-posts the current card publicly. Owner decisions, 2026-11-03: search with autocomplete and linked
-cards; replies visible only to the requester with a Share button; incomplete entries shown with a
-badge.
+posts the whole card publicly, menus and stage buttons included. Owner decisions, 2026-11-03: search
+with autocomplete and linked cards; replies visible only to the requester with a Share button;
+incomplete entries shown with a badge. Owner request, 2026-11-04: Share must not post a static
+snapshot of the current view; others must be able to page through every quest stage and follow the
+card's links.
 
 Non-goals: reading guide.fallensword.com or the game; filter/browse lists (a later spec may add
 `/guide browse`); shop inventories; editing catalog data; role gating (commands stay ungated,
@@ -56,9 +58,12 @@ Depends on `2026-11-guide-catalog-reader.md` (`createCatalogReader`).
   card with stages also shows **◀ Stage** / **Stage ▶** buttons. Choosing an option or stage updates
   the same ephemeral message to that card or stage. Entries flagged `known: false` are listed in the
   card text but not offered in menus.
-- AC-5: Given **Share**, the bot posts the current card publicly in the channel without components
-  and with `allowed_mentions: { parse: [] }`, and confirms ephemerally. Nothing is shared without
-  the button.
+- AC-5: Given **Share**, the bot posts the card publicly in the channel at the requester's current
+  stage, with the same relation menus, stage buttons and realm/master-realm button but no Share
+  button, and with `allowed_mentions: { parse: [] }`, then confirms ephemerally. Nothing is shared
+  without the button. A menu or stage button used on the shared post replies to that member with an
+  ephemeral card (which has Share again) and never edits the shared post. A component counts as
+  "on the requester's card" only when its message carries the Ephemeral flag.
 - AC-6: Given a typed name not chosen from autocomplete, the bot resolves an exact case-insensitive
   match of that kind; if several match it shows an ephemeral picker; if none match it replies
   ephemerally "No <kind> named …" with up to 5 suggestions. Given a menu or button for an entry that
@@ -109,7 +114,7 @@ Depends on `2026-11-guide-catalog-reader.md` (`createCatalogReader`).
 | AC-2 | Fake reader returning 30 rows → 25 choices, labels ≤100; rejecting/slow reader → `respond([])` once, WARN without typed text. |
 | AC-3 | `renderCard` per kind: ephemeral flag, fields present, badge text only for incomplete. |
 | AC-4 | Relations >25 → placeholder "(25 of N)", 25 options; select/stage interactions call `update()` with the target card. |
-| AC-5 | Share → public `followUp` without components and with empty mention parse; ephemeral confirmation. |
+| AC-5 | Share → public reply with menus and stage buttons, no Share button, empty mention parse; ephemeral confirmation. Stage/menu on a non-ephemeral message → ephemeral `reply`, no `update`. |
 | AC-6 | Free text exact/multiple/none cases; deleted entry from a menu → ephemeral notice. |
 | AC-7 | Fresh module instance handles old `custom_id`s; malformed IDs (`guide:open:item:abc`, 101 chars, unknown kind) → expired notice, no reader call. |
 | AC-8 | Oversized fixture (8 KB stage, 60 enhancements) renders within every limit. |

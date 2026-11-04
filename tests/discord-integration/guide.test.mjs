@@ -3,7 +3,7 @@
 // through the real reader on the test database. Nothing reaches Discord, the game or the guide site.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { MessageFlags, ComponentType } from 'discord.js';
+import { MessageFlags, MessageFlagsBitField, ComponentType } from 'discord.js';
 import { createGuideHandlers, renderCard, parseGuideCustomId, MESSAGES } from '../../discord_modules/guide.js';
 import { createCatalogReader } from '../../catalog/catalogReader.js';
 import { freshClient, closeClients } from '../helpers/db-client.mjs';
@@ -52,10 +52,12 @@ function handlers(reader, extra = {}) {
     return { ...h, logs };
 }
 
-function interaction({ sub = 'item', name, focused, customId, values } = {}) {
+// Component interactions come from the requester's ephemeral card unless `onShared` is set.
+function interaction({ sub = 'item', name, focused, customId, values, onShared = false } = {}) {
     const out = [];
     return {
         out, customId, values,
+        message: { flags: new MessageFlagsBitField(onShared ? 0 : MessageFlags.Ephemeral) },
         options: { getSubcommand: () => sub, getString: () => name, getFocused: () => focused },
         respond: async choices => out.push(['respond', choices]),
         deferReply: async body => out.push(['deferReply', body]),
@@ -90,8 +92,10 @@ test('cards render per kind with an incomplete badge, relation menus, stage butt
     assert.match(renderCard(CARDS.quest, { stage: 2 }).embeds[0].description, /Stage 2 of 2\*\*\nReport back\./);
 
     const shared = renderCard(CARDS.item, { shared: true });
-    assert.deepEqual(shared.components, []);
+    assert.deepEqual(customIds(shared), ['guide:go:0'], 'shared cards keep their menus but not Share');
     assert.match(shared.embeds[0].footer.text, /shared from \/guide$/);
+    assert.deepEqual(customIds(renderCard(CARDS.quest, { stage: 2, shared: true })), ['guide:stage:51:1', 'guide:stage:51:2', 'guide:open:realm:9']);
+    assert.deepEqual(renderCard({ ...CARDS.quest, stages: [], realm: null }, { shared: true }).components, [], 'no empty button row');
 });
 
 test('oversized cards stay within every Discord limit', () => {
@@ -164,7 +168,7 @@ test('the command replies ephemerally with a picked card, an exact match, a pick
     assert.equal(gone.out[1][1].content, MESSAGES.gone);
 });
 
-test('menus, stage buttons and Share navigate statelessly; Share posts publicly without components or mentions', async () => {
+test('menus, stage buttons and Share navigate statelessly; Share posts the navigable card publicly without mentions', async () => {
     const { reader } = fakeReader();
     const h = handlers(reader);
     const select = interaction({ customId: 'guide:go:2', values: ['realm:9'] });
@@ -180,10 +184,22 @@ test('menus, stage buttons and Share navigate statelessly; Share posts publicly 
     await h.component(share);
     assert.equal(share.out[0][0], 'reply');
     assert.equal(share.out[0][1].flags, undefined, 'public');
-    assert.deepEqual(share.out[0][1].components, []);
+    assert.deepEqual(customIds(share.out[0][1]), ['guide:stage:51:1', 'guide:stage:51:2', 'guide:open:realm:9']);
     assert.deepEqual(share.out[0][1].allowedMentions, { parse: [] });
     assert.match(share.out[0][1].embeds[0].description, /Stage 2 of 2/);
     assert.deepEqual(share.out[1], ['followUp', { content: MESSAGES.shared, flags: MessageFlags.Ephemeral }]);
+
+    // On the shared post, stage buttons and menus open a private card for the clicker; the post stays as it is.
+    const publicStage = interaction({ customId: 'guide:stage:51:1', onShared: true });
+    await h.component(publicStage);
+    assert.equal(publicStage.out.length, 1);
+    assert.equal(publicStage.out[0][0], 'reply');
+    assert.equal(publicStage.out[0][1].flags, MessageFlags.Ephemeral);
+    assert.match(publicStage.out[0][1].embeds[0].description, /Stage 1 of 2/);
+    assert.ok(customIds(publicStage.out[0][1]).includes('guide:share:quest:51:1'), 'the private copy can be shared again');
+    const publicMenu = interaction({ customId: 'guide:go:0', values: ['realm:9'], onShared: true });
+    await h.component(publicMenu);
+    assert.deepEqual([publicMenu.out[0][0], publicMenu.out[0][1].flags, publicMenu.out[0][1].embeds[0].title], ['reply', MessageFlags.Ephemeral, 'Mountain Path']);
 
     const missing = interaction({ customId: 'guide:open:item:424242' });
     await h.component(missing);

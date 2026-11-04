@@ -10,6 +10,8 @@ import {
 
 // /guide reads GoGon's own catalog (specs/tasks/2026-11-discord-guide.md), never the live guide site.
 import { guideCommand, handleGuideAutocomplete, handleGuideCommand, handleGuideComponent } from './discord_modules/guide.js';
+// /about offers the AGPL Corresponding Source, the Terms of Use and the Privacy Policy.
+import { aboutCommand, handleAboutCommand } from './discord_modules/about.js';
 
 import { handleGvgCooldownInteraction } from './discord_modules/gvg.js';
 import { handleBuffInteraction, handleBeBuffInteraction, handleCheckBuffsInteraction } from './discord_modules/buffs.js';
@@ -83,6 +85,7 @@ export async function setupDiscord(token, appId, guildId) {
                 checkBuffsCmd.toJSON(),
                 gvgCmd.toJSON(),
                 guideCommand.toJSON(),
+                aboutCommand.toJSON(),
             ] }
         );
         console.log('[GoGon] ✅ Slash commands registered successfully');
@@ -121,6 +124,8 @@ export async function setupDiscord(token, appId, guildId) {
                 await handleGvgCooldownInteraction(interaction);
             } else if (commandName === 'guide') {
                 await handleGuideCommand(interaction);
+            } else if (commandName === 'about') {
+                await handleAboutCommand(interaction);
             }
         } catch (error) {
             console.error(`[GoGon] ❌ Error handling command ${commandName}:`, error);
