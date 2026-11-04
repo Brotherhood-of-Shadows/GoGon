@@ -165,3 +165,28 @@ test('compact detail tables stay one level deep, outside the header, and keep a 
     assert.throws(() => parseItemTooltip(recipe.replace('>5900<', '>about 5900<'), 17071), error => error.code === 'invalid_number');
     assert.throws(() => parseItemTooltip(`${recipe}${recipe}`, 17071), error => error.code === 'compact_layout_invalid');
 });
+
+const comparison = readFileSync('tests/catalog-sync/fixtures/item-tooltip-comparison.html', 'utf8');
+
+test('equipped-item comparison yields the requested item only and never stores the equipped one', () => {
+    assert.deepEqual(parseItemTooltip(comparison, 17070), parseItemTooltip(epic, 17070));
+    assert.doesNotMatch(JSON.stringify(parseItemTooltip(comparison, 17070)), /Iklilian|Excellent|15210|148/);
+    const [requested, equipped] = comparison.match(/<table width="250"[\s\S]*?<\/table>/g);
+    const sameCell = `<html><body><table><tr><td>${requested}<br>${equipped}</td></tr></table></body></html>`;
+    assert.equal(parseItemTooltip(sameCell, 17070).record.name, 'Twangy’s Axe');
+    const labelled = comparison.replace(`<td valign="top">${equipped}`, `<td valign="top"><b>Currently Equipped</b>${equipped}`);
+    assert.equal(parseItemTooltip(labelled, 17070).record.name, 'Twangy’s Axe');
+});
+
+test('only the exact two-cell comparison wrapper is accepted; other multi-item documents stay ambiguous', () => {
+    const [requested, equipped] = comparison.match(/<table width="250"[\s\S]*?<\/table>/g);
+    const cell = table => `<td>${table}</td>`;
+    for (const body of [
+        `<html><body><table><tr>${cell(requested)}${cell(equipped)}${cell(equipped.replace("Iklilian's", 'Third'))}</tr></table></body></html>`,
+        `<html><body><table><tr>${cell(requested)}</tr></table><table><tr>${cell(equipped)}</tr></table></body></html>`,
+        `<html><body><p>Market listing</p><table><tr>${cell(requested)}${cell(equipped)}</tr></table></body></html>`,
+        `<html><body><table><tr>${cell(requested)}${cell(equipped)}<td><table><tr><td>Other</td></tr></table></td></tr></table></body></html>`,
+        `<html><body><table><tr>${cell(requested)}${cell(equipped)}<td>${'Long page text '.repeat(10)}</td></tr></table></body></html>`,
+        `<html><body><div>${requested}${equipped}</div></body></html>`,
+    ]) assert.throws(() => parseItemTooltip(body, 17070), error => error.code === 'multiple_item_tables', body.slice(0, 80));
+});

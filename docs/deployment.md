@@ -196,8 +196,11 @@ came from, and every change it makes to the tables Discord reads can be rolled b
   An unrecognized tooltip keeps the cursor and shows its parser code in *Last response*. When the
   response holds several distinct `item-tip` tables (`multiple_item_tables`) or nested ones
   (`nested_item_tables`), it also shows each table's name, type, enclosing elements and preceding
-  label. Discovery never guesses which table is the requested item; identical repeated copies are
-  accepted as one. The latest unrecognized response is saved, with scripts, forms, links and
+  label. When the bot's character has an item equipped in the requested item's slot, the game
+  answers the same URL with a comparison: one wrapper table with the requested item in its first
+  cell and the equipped item in the second. Discovery reads the first and ignores the equipped one.
+  Identical repeated copies are accepted as one; any other multi-item layout is rejected rather
+  than guessed. The latest unrecognized response is saved, with scripts, forms, links and
   non-layout attributes removed, as an owner-only file in the private debug volume:
 
   ```sh

@@ -37,3 +37,11 @@ script; tests add those separately). It covers all twelve enhancements, stamina/
 equipment divider, and the actual 17069 → 17070 workflow. The worker's own session received a
 different 5302-byte response with several `item-tip` tables for this ID (2026-11-03), so this
 fixture attests the owner's view, not the bot account's.
+
+`item-tooltip-comparison.html` reconstructs the worker's live 17070 response (2026-11-03, 5302 bytes):
+the game wraps the requested item and the bot character's equipped item of the same slot in one
+table, each tooltip in a wrapper cell. The live diagnostic showed exactly two `item-tip` tables in
+`body>table>tr>td`: Twangy’s Axe (requested) first, then Iklilian's Starweaver (Weapon - Epic -
+Excellent). The first table is the owner's real 17070 tooltip; the equipped item's stats are
+illustrative. Replace it with `/var/lib/gogon-sso-debug/last-item-tooltip.html` if a capture shows
+a different wrapper.

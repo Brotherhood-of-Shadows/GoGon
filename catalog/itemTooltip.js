@@ -33,7 +33,7 @@ function describeTables($, tables) {
 
 // One top-level tooltip table, or several byte-identical copies of it once whitespace is
 // collapsed. Distinct or nested tables stay rejected: choosing one could announce a different
-// item (for example an equipped comparison) under the requested ID.
+// item under the requested ID. The one exception is the game's equipped-item comparison below.
 function singleItemTable($) {
     const tables = $('table.item-tip');
     if (tables.length <= 1) return tables;
@@ -41,7 +41,27 @@ function singleItemTable($) {
         throw new ItemTooltipError('Nested item tables.', 'nested_item_tables', describeTables($, tables));
     const copies = new Set(tables.toArray().map(element => clean($.html(element)).replace(/>\s+</g, '><')));
     if (copies.size === 1) return tables.first();
+    const requested = comparisonRequestedTable($, tables);
+    if (requested) return requested;
     throw new ItemTooltipError('Multiple item tables.', 'multiple_item_tables', describeTables($, tables));
+}
+
+// When the bot's character has an item equipped in the requested item's slot, the game answers the
+// same fetchitem URL with a comparison: one wrapper table whose cells hold the requested item
+// first and the equipped item second (live 17070, 2026-11-03: Twangy’s Axe, then the account's
+// Iklilian's Starweaver). Only that exact shape is accepted; the equipped item is account state
+// and is ignored. Anything else stays ambiguous and is rejected with its structure.
+function comparisonRequestedTable($, tables) {
+    const content = $('body').children().not('script, link, style');
+    if (tables.length !== 2 || content.length !== 1 || !content.is('table')) return null;
+    const wrapper = content[0];
+    const ownTables = content.find('table').toArray().filter(table => !$(table).parents('table.item-tip').length);
+    const inWrapperCells = tables.toArray().every(table => $(table).parent().is('td') && $(table).parent().closest('table')[0] === wrapper);
+    if (!inWrapperCells || ownTables.length !== 2) return null;
+    const outside = content.clone();
+    outside.find('table.item-tip').remove();
+    if (clean(outside.text()).length > 64) return null;
+    return tables.first();
 }
 
 function numeric(value) {
