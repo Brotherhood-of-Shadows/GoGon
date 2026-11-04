@@ -262,7 +262,14 @@ came from, and every change it makes to the tables Discord reads can be rolled b
 
   The earlier Tampermonkey relay and its stage-only tokens remain available for manual recovery; the
   scheduled server reader does not need an extension or a relay token.
-  Manual relays should use the regenerated userscript version 1.0.3 for relic/quest detail support.
+  Manual relays should use the regenerated userscript version 1.0.4 for relic/quest detail support.
+
+  Relic and quest details follow the live Guide layouts (captured 2026-11-03). A relic stores its
+  location, label/value statistics and Enhancements; a quest stores one section per stage with its
+  minimum level, location, required item/kills and story, using the lowest stage level and the first
+  stage's realm. Very long quest stories are shortened to the 12,000-byte record budget. Earlier
+  versions rejected every live relic and quest page, so those IDs showed as failed or pending; they
+  are read again at the next daily scan (failed) or when their retry backoff ends (pending).
 - **Game jobs.** `observe_realm` needs one captured `fetchLocation` response before it can be enabled
   (DEC-CAT-019), so it is shown disabled with that reason. The legacy JSON `item_frontier` job remains
   unverified; daily *Item releases* uses the owner-supplied HTML tooltip contract independently.

@@ -286,44 +286,99 @@ export function parseMasterRealmDetail(doc, id) {
 }
 
 // Relics and quests retain structured text sections, never executable page HTML. Unknown layouts
-// stay incomplete: a name alone or a list of links is not a successful detail read.
-function parseLocatedDetail(doc, id) {
-    const { name, minLevel } = headerNameAndLevel(doc);
-    const realms = linkList(doc, 'realm_id');
-    if (!name || !realms.length) return null;
-    const table = doc.querySelector('.tHeader b')?.closest('table');
-    const sections = [];
-    let section = null;
-    for (const row of table?.querySelectorAll('tr') ?? []) {
-        const heading = cleanText(row.querySelector('.tHeader')?.textContent);
-        if (heading) {
-            section = /statistics|bonuses|description|requirements|rewards|details|story|tasks|steps|quest/i.test(heading)
-                && !heading.includes(name) ? { heading, text: '' } : null;
-            if (section && sections.length < 64) sections.push(section);
-            continue;
-        }
-        if (!section) continue;
-        const text = cleanText(row.textContent, 8192);
-        if (text) section.text = cleanText(`${section.text} ${text}`, 8192);
-    }
-    const populated = sections.filter(section => section.text);
-    if (!populated.length) return null;
-    if (new TextEncoder().encode(JSON.stringify(populated)).length > 12000) return null;
-    return { id, name, minLevel, realmId: realms[0].id, realmName: realms[0].name, sections: populated };
+// stay incomplete: a name alone or a list of links is not a successful detail read. Both layouts
+// below are the live Guide pages captured on 2026-11-03 (tests/catalog-sync/fixtures/guide-*-live.html).
+const LOCATED_JSON_BYTES = 12000;
+
+// Visible text lines of an element: <br> and table rows/cells break lines; nothing is executed.
+function textLines(element) {
+    const parts = [];
+    const walk = node => {
+        if (node.nodeType === 3) { parts.push(node.nodeValue); return; }
+        if (node.nodeType !== 1) return;
+        const tag = String(node.tagName).toLowerCase();
+        if (tag === 'script' || tag === 'style') return;
+        if (tag === 'br') { parts.push('\n'); return; }
+        for (const child of node.childNodes) walk(child);
+        if (['tr', 'p', 'div', 'td'].includes(tag)) parts.push('\n');
+    };
+    walk(element);
+    return parts.join('').split('\n').map(line => cleanText(line, 8192)).filter(Boolean);
 }
 
-/** Parses a located relic record; unknown layouts return null.
- * @param {Document} doc Guide document.
- * @param {number} id Guide ID.
- * @returns {object|null} Structured detail.
- */
-export function parseRelicDetail(doc, id) { return parseLocatedDetail(doc, id); }
+function locatedRecord(id, name, minLevel, realm, sections) {
+    const populated = sections.filter(section => section.heading && section.text).slice(0, 64);
+    if (!name || !realm || !populated.length) return null;
+    if (new TextEncoder().encode(JSON.stringify(populated)).length > LOCATED_JSON_BYTES) return null;
+    return { id, name, minLevel, realmId: realm.id, realmName: realm.name, sections: populated };
+}
 
-/** Parses a located quest record; unknown layouts return null.
+/** Parses a relic page: name header, Location row, label/value statistics, Enhancements section.
  * @param {Document} doc Guide document.
  * @param {number} id Guide ID.
- * @returns {object|null} Structured detail.
+ * @returns {object|null} Structured detail, or null for an unknown layout.
  */
-export function parseQuestDetail(doc, id) { return parseLocatedDetail(doc, id); }
+export function parseRelicDetail(doc, id) {
+    const header = doc.querySelector('.tHeader b');
+    const name = cleanText(header?.textContent);
+    const table = header?.closest('table');
+    if (!name || !table || header.closest('tr') !== table.querySelector('tr')) return null;
+    const realm = linkList(table, 'realm_id')[0];
+    const sections = [{ heading: 'Location', entries: [] }, { heading: 'Statistics', entries: [] }];
+    let current = sections[1];
+    for (const row of table.querySelectorAll('tr')) {
+        if (row.closest('table') !== table) continue;
+        const heading = cleanText(row.querySelector('.tHeader')?.textContent);
+        if (heading) {
+            if (heading !== name) { current = { heading, entries: [] }; sections.push(current); }
+            continue;
+        }
+        const cells = [...row.children].filter(cell => String(cell.tagName).toLowerCase() === 'td');
+        for (let i = 0; i < cells.length - 1; i++) {
+            const label = cleanText(cells[i].textContent);
+            if (!label || !label.endsWith(':')) continue;
+            const value = cleanText(cells[i + 1].textContent, 512);
+            if (value == null) continue;
+            const target = /^location:$/i.test(label) ? sections[0] : current;
+            if (target.entries.length < 100) target.entries.push(target === sections[0] ? value : `${label.slice(0, -1)}: ${value}`);
+            i++;
+        }
+    }
+    return locatedRecord(id, name, null, realm, sections.map(section => ({ heading: section.heading, text: cleanText(section.entries.join('; '), 8192) })));
+}
+
+/** Parses a quest page: name header and one section per stage with its requirements and story.
+ * The quest's level is its lowest stage Minimum Level; its realm is the first stage location.
+ * Story text is shortened, never dropped, when the stages would exceed the record size budget.
+ * @param {Document} doc Guide document.
+ * @param {number} id Guide ID.
+ * @returns {object|null} Structured detail, or null for an unknown layout.
+ */
+export function parseQuestDetail(doc, id) {
+    const name = cleanText(doc.querySelector('.tHeader b')?.textContent);
+    const stages = [...doc.querySelectorAll('div[id^="stage_"]')].slice(0, 64);
+    if (!name || !stages.length) return null;
+    let realm = null;
+    let minLevel = null;
+    const parsed = stages.map(stage => {
+        const columns = stage.querySelector('tr')?.children ?? [];
+        const [facts = [], story = []] = [...columns].slice(0, 2).map(textLines);
+        realm ??= linkList(stage, 'realm_id')[0] ?? null;
+        const heading = facts.find(line => /^stage\s+\d+$/i.test(line)) ?? cleanText(`Stage ${stage.getAttribute('id').slice(6)}`);
+        const level = facts.map(line => line.match(/^minimum level:\s*(\d+)/i)).find(Boolean);
+        if (level) minLevel = minLevel == null ? Number(level[1]) : Math.min(minLevel, Number(level[1]));
+        const requirements = facts.filter(line => line !== heading).map(line => line.replace(/:\s*/, ': '));
+        return { heading, requirements: requirements.join('. '), story: story.join(' ') };
+    });
+    const budget = Math.floor((LOCATED_JSON_BYTES - 200) / parsed.length) - 64;
+    const sections = parsed.map(stage => {
+        const room = Math.max(0, budget - new TextEncoder().encode(stage.requirements).length - 4);
+        const encoded = new TextEncoder().encode(stage.story);
+        const story = encoded.length <= room ? stage.story
+            : `${new TextDecoder().decode(encoded.slice(0, Math.max(0, room - 3))).replace(/�+$/, '')}…`;
+        return { heading: stage.heading, text: cleanText([stage.requirements, story].filter(Boolean).join(' — '), 8192) };
+    });
+    return locatedRecord(id, name, minLevel, realm, sections);
+}
 
 export const DETAIL_PARSERS = { item: parseItemDetail, creature: parseCreatureDetail, realm: parseRealmDetail, master_realm: parseMasterRealmDetail, relic: parseRelicDetail, quest: parseQuestDetail };

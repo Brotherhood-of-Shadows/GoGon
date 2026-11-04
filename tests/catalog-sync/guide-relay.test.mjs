@@ -39,13 +39,15 @@ function createSite() {
     const nav = '<div><a href="index.php?cmd=items">Items</a></div>';
     const page = body => `<html><body>${nav}<table>${body}</table></body></html>`;
     const details = {
-        relic: id => page(`<tr><td class="tHeader"><b>Stone of Echoes</b></td></tr>
-            <tr><td><a href="index.php?cmd=realms&subcmd=view&realm_id=1200">Mountain Path</a></td></tr>
-            <tr><td class="tHeader"><b>Bonuses</b></td></tr><tr><td>Attack: 5%</td></tr>`),
-        quest: id => page(`<tr><td class="tHeader"><b>The Golem's Heart (Min Level: 1)</b></td></tr>
-            <tr><td><a href="index.php?cmd=realms&subcmd=view&realm_id=1200">Mountain Path</a></td></tr>
-            <tr><td class="tHeader"><b>Description</b></td></tr><tr><td>Find the heart.</td></tr>
-            <tr><td class="tHeader"><b>Rewards</b></td></tr><tr><td>100 XP</td></tr>`),
+        // Live Guide layouts (tests/catalog-sync/fixtures/guide-relic-live.html, guide-quest-live.html).
+        relic: id => page(`<tr><td colspan="10" class="tHeader"><b>Stone of Echoes</b></td></tr>
+            <tr><td><b>Location:</b></td><td colspan="6"><a href="index.php?cmd=realms&subcmd=view&realm_id=1200">Mountain Path</a> (7,9)</td></tr>
+            <tr><td><b>Attack:</b></td><td>5</td><td></td><td><b>Defense:</b></td><td>0</td><td></td></tr>
+            <tr><td colspan="10" class="tHeader"><b>Enhancements</b></td></tr><tr><td><nobr><b>Dodge:</b></nobr></td><td colspan="3">5%</td></tr>`),
+        quest: id => page(`<tr><td colspan="10" class="tHeader"><b>The Golem's Heart</b></td></tr>
+            <tr><td colspan="10"><div id="stage_1"><table><tr><td><b>Stage 1</b><br>Minimum Level: 1<br>
+            Location:<a href="index.php?cmd=realms&subcmd=view&realm_id=1200">Mountain Path</a> (4, 3)<br>Required Item: None<br></td>
+            <td><table><tr><td>Find the heart.</td></tr><tr><td>You gain 100 XP</td></tr></table></td></tr></table></div></td></tr>`),
         item: id => page(`<tr><td class="tHeader" colspan="10"><b>${site.itemName(id)}</b> (Rare)</td></tr>
             <tr><td class="tHeader" colspan="10"><b>Statistics</b></td></tr><tr><td>Level:</td><td>10</td></tr>
             <tr><td class="tHeader" colspan="10"><b>Dropped By</b></td></tr><tr><td>Creature ${id === 17048 ? 7001 : 7002} (Beast):</td><td>1%</td></tr>`),
