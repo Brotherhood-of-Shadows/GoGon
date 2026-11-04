@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Licensing: GoGon is now licensed under the GNU Affero General Public License v3.0 or later (`LICENSE`, `NOTICE.md`). Code up to commit 18dcf39 also remains available under its earlier ISC license. Added the service's Terms of Use (`TERMS.md`) and LGPD Privacy Policy (`PRIVACY.md`); Brotherhood of Shadows is the operator, contacted through its Discord server.
+
 - Fix MySQL seed promotion failing when all three completeness reasons apply: migration 017 widens `incomplete_reason` from 64 to 128 characters so the 65-character diagnostic is preserved. The historical entity-key widening test now checks the two tables changed by migration 005, independently of newer Guide tracking tables.
 
 - Guide scheduling: one CatalogSync workflow scans all Guide index pages daily by default. Set **Guide scan interval (hours)** in Settings → Guide catalog (1–720 hours, applied live), or use **Scan Guide now** in Catalog → Sync. Every encountered ID is checked against stored completeness, including old IDs appearing on existing pages. Missing data is filled for creatures, items, realms/maps, master realms, relics and quests; complete records are skipped. A successful page read alone cannot mark incomplete stored data complete, and unchanged source content can repair missing stored fields. Migration 016 extends Guide tracking and preserves existing serving identities. Relic/quest parsing is fixture-tested; live detail layout verification remains pending because public requests returned 403. Saved event data remains after its Guide entry disappears.
@@ -31,8 +33,8 @@
 **"GoGon" (GG)** - An automated monitoring and notification system for the Fallensword MMORPG. The bot scrapes game data, tracks events, and sends real-time Discord notifications using a sophisticated task scheduler and database-backed state management.
 
 **Version:** 1.7.0  
-**Author:** CrazyWest Notifications INC  
-**License:** ISC  
+**Author:** Brotherhood of Shadows  
+**License:** AGPL-3.0-or-later (earlier code also under ISC; see NOTICE.md)  
 **Node Version:** 20+ (ES Modules)  
 **Discord.js:** 14.22.1
 

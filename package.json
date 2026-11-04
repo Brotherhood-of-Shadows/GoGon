@@ -13,8 +13,8 @@
   "description": "Headless Firefox Browser to run Fallensword notifications and commands on discord",
   "main": "engine.js",
   "keywords": [],
-  "author": "CrazyWest Notifications INC",
-  "license": "ISC",
+  "author": "Brotherhood of Shadows (https://github.com/Brotherhood-of-Shadows)",
+  "license": "AGPL-3.0-or-later",
   "dependencies": {
     "cheerio": "^1.1.2",
     "discord.js": "^14.25.1",
