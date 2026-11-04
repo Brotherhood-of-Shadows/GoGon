@@ -104,11 +104,13 @@ test('AC-DISC-001: registers /buff, /bebuff, /checkbuffs, /gvgcooldown, /guide a
         bebuff: [['target', true], ['buffs', true]],
         checkbuffs: [['username', true]],
         gvgcooldown: [],
-        guide: ['item', 'creature', 'realm', 'master-realm', 'relic', 'quest'].map(name => [name, undefined]),
+        guide: [...['item', 'creature', 'realm', 'master-realm', 'relic', 'quest'].map(name => [name, undefined]), ['browse', undefined]],
         about: [],
     });
     const guide = body.find(c => c.name === 'guide');
-    assert.ok(guide.options.every(sub => sub.options.length === 1 && sub.options[0].name === 'name' && sub.options[0].required && sub.options[0].autocomplete));
+    const [browse] = guide.options.filter(sub => sub.name === 'browse');
+    assert.ok(guide.options.filter(sub => sub !== browse).every(sub => sub.options.length === 1 && sub.options[0].name === 'name' && sub.options[0].required && sub.options[0].autocomplete));
+    assert.deepEqual(browse.options.map(sub => sub.name), ['item', 'creature', 'realm', 'master-realm', 'relic', 'quest'], 'AC-DISC-008: browse group');
 });
 
 test('AC-DISC-001: the client binds one interaction listener and one error listener', async () => {

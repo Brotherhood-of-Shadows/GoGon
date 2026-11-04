@@ -177,6 +177,28 @@ incomplete carry a badge with the same reason wording as the Catalog tab. Menus 
 restart. A database outage produces an ephemeral "Guide data is unavailable right now" and one
 `[guide]` error line; slow or failed autocomplete logs a `[guide]` warning without the typed text.
 
+`/guide browse item|creature|realm|master-realm|relic|quest` lists catalog entries 10 per page,
+lowest level first (entries without a level last, then by name; relics by realm, then name). Its
+filters are all optional:
+
+| Kind | Filters |
+| --- | --- |
+| item | `rarity`, `type`, `min-level`, `max-level` |
+| creature | `class`, `min-level`, `max-level` |
+| realm | `master-realm`, `min-level`, `max-level` |
+| master-realm | `min-level`, `max-level` |
+| relic | `realm` |
+| quest | `realm`, `min-level`, `max-level` |
+
+Rarity, type and class autocomplete from the values stored in the catalog; realm filters
+autocomplete realm names. The list is private: ◀ ▶ page through it, the menu opens an entry as a new
+private card, and **Share** posts the page to the channel with working paging and menu (used there,
+they answer privately and leave the post unchanged). Incomplete entries are marked "⚠️ Incomplete";
+the card shows why. Item type and level and creature class and level come from indexed columns that
+migration 023 derives from the stored stats, so no re-scan is needed. Slow list clicks log
+`Slow page item…` / `Slow share item…` warnings like the ones below; failures log
+`Browse failed for <kind>` without the filters.
+
 A button or menu that stays on its loading dots can be traced with the `[guide]` warnings:
 `Slow stage quest: reached GoGon 2600 ms after the click, catalog read 12 ms, Discord answered in 180 ms…`
 splits the wait into Discord delivering the click (or GoGon being busy), the MySQL read, and Discord

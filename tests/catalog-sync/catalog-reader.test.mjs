@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { parseHTML } from 'linkedom';
 import { freshClient, closeClients } from '../helpers/db-client.mjs';
 import { createCatalogStore, CatalogError } from '../../_gg_data/handler/catalogStore.js';
-import { createCatalogReader, INCOMPLETE_REASON_LABELS } from '../../catalog/catalogReader.js';
+import { createCatalogReader, INCOMPLETE_REASON_LABELS, normalizeBrowseFilters } from '../../catalog/catalogReader.js';
 import { parseQuestDetail, parseRelicDetail } from '../../catalog/guideParsers.js';
 
 after(closeClients);
@@ -128,4 +128,79 @@ test('invalid input is refused before SQL; missing rows are null and corrupt JSO
     assert.equal(await reader.card('item', 999999), null);
     const broken = await reader.card('item', 12);
     assert.deepEqual([broken.name, broken.stats, broken.type, broken.level], ['Broken Data', {}, null, null]);
+});
+
+// --- browse (specs/tasks/2026-11-guide-browse.md) ---------------------------------------------------
+
+test('browse AC-3/AC-4: filters on stored rarity, type and level, ordered by level with unlevelled entries last', async () => {
+    const { db, reader } = await setup();
+    for (let n = 0; n < 14; n++) await db.query('INSERT INTO items (id, name, rarity, stats) VALUES (?, ?, ?, ?)', [30000 + n, `Helm ${String(n).padStart(2, '0')}`, 'Epic', json({ type: 'Helmet', level: 1000 + (n % 7) * 100 })]);
+    await db.query('INSERT INTO items (id, name, rarity, stats) VALUES (?, ?, ?, ?)', [30100, 'Helm Unlevelled', 'Epic', json({ type: 'Helmet' })]);
+    await db.query('INSERT INTO items (id, name, rarity, stats) VALUES (?, ?, ?, ?)', [30101, null, 'Epic', json({ type: 'Helmet', level: 1 })]);
+
+    const all = await reader.browse('item', { rarity: 'Epic', type: 'Helmet' }, 1);
+    assert.deepEqual([all.total, all.pages, all.page, all.entries.length], [16, 2, 1, 10], 'the unnamed row is never listed');
+    assert.deepEqual(all.entries.slice(0, 3).map(e => [e.id, e.name]), [[30000, 'Helm 00'], [30007, 'Helm 07'], [30001, 'Helm 01']], 'level, then name');
+    const last = await reader.browse('item', { rarity: 'Epic', type: 'Helmet' }, 2);
+    assert.deepEqual(last.entries.slice(-2).map(e => e.id), [17071, 30100], 'level 6000 then no level, last');
+    assert.equal(last.entries.at(-2).hint, 'Helmet • Epic • Lvl 6000');
+
+    const range = await reader.browse('item', { type: 'Helmet', minLevel: 1500, maxLevel: 1100 }, 1);
+    assert.deepEqual(range.filters, { type: 'Helmet', minLevel: 1100, maxLevel: 1500 }, 'swapped bounds are ordered');
+    assert.ok(range.entries.every(e => /Lvl 1[1-5]00$/.test(e.hint)));
+    assert.equal(range.total, 10);
+    assert.equal((await reader.browse('item', { type: 'helmet' })).total, 0, 'values match the stored spelling exactly');
+
+    const clamped = await reader.browse('item', { rarity: 'Epic', type: 'Helmet' }, 9999);
+    assert.equal(clamped.page, 2, 'a page past the end shows the last page');
+    const none = await reader.browse('item', { rarity: 'Nope' }, 3);
+    assert.deepEqual([none.total, none.pages, none.page, none.entries], [0, 1, 1, []]);
+
+    const unfiltered = await reader.browse('item', {}, 9999);
+    assert.deepEqual(unfiltered.entries.slice(-3).map(e => e.id), [12, 30100, 17069], 'unlevelled rows, invalid stats JSON included, come last by name');
+    assert.equal((await reader.browse('item', { maxLevel: 1000000 })).entries.some(e => e.id === 12), false);
+});
+
+test('browse AC-3/AC-4: incomplete marker, creature class, realm and quest levels, relics by realm', async () => {
+    const { db, reader } = await setup();
+    const epic = await reader.browse('item', { rarity: 'Epic' });
+    assert.deepEqual(epic.entries.map(e => [e.id, e.incomplete]), [[17071, false], [17070, true]], 'same level: by name');
+
+    await db.query('INSERT INTO creatures (id, name, stats) VALUES (?, ?, ?), (?, ?, ?)',
+        [2278, 'Big Rat', json({ class: 'Beast', level: 40 }), 2279, 'Ghost', json({ class: 'Undead', level: 5 })]);
+    assert.deepEqual((await reader.browse('creature', { class: 'Beast' })).entries.map(e => [e.id, e.hint]), [[2277, 'Beast • Lvl 1'], [2278, 'Beast • Lvl 40']]);
+    assert.deepEqual((await reader.browse('creature', { minLevel: 5 })).entries.map(e => e.id), [2279, 2278]);
+
+    assert.deepEqual((await reader.browse('realm', { masterRealm: 5 })).entries.map(e => [e.id, e.hint]), [[9, 'Lvl 1'], [7096, 'Lvl 3500']]);
+    assert.deepEqual((await reader.browse('realm', { minLevel: 2 })).entries.map(e => e.id), [7096]);
+    assert.deepEqual((await reader.browse('master_realm', { maxLevel: 5 })).entries.map(e => e.id), [5]);
+
+    await db.query('INSERT INTO relics (id, realm_id, name) VALUES (?, ?, ?), (?, ?, ?)', [42, 9, 'Zeta Relic', 43, 9, 'Alpha Relic']);
+    assert.deepEqual((await reader.browse('relic')).entries.map(e => [e.id, e.hint]),
+        [[41, 'Kanarak Forest (Frenzy)'], [43, 'Mountain Path'], [42, 'Mountain Path']], 'realm name, then relic name');
+    assert.deepEqual((await reader.browse('relic', { realm: 9 })).entries.map(e => e.id), [43, 42]);
+    assert.deepEqual((await reader.browse('quest', { realm: 9, minLevel: 0, maxLevel: 1 })).entries.map(e => [e.id, e.hint]), [[51, 'Mountain Path • Lvl 1']]);
+});
+
+test('browse AC-2/AC-4: filter values autocomplete and resolve in stored spelling; invalid filters are refused before SQL', async () => {
+    const { db, reader } = await setup();
+    await db.query('INSERT INTO items (id, name, rarity, stats) VALUES (?, ?, ?, ?)', [30200, 'Ring', 'Super Elite', json({ type: 'Ring', level: 3 })]);
+    assert.deepEqual(await reader.filterValues('item', 'type', 'hel'), ['Helmet']);
+    assert.deepEqual(await reader.filterValues('item', 'type', ''), ['Helmet', 'Quest', 'Ring', 'Weapon']);
+    assert.deepEqual(await reader.filterValues('item', 'rarity', 'E'), ['Epic', 'Super Elite']);
+    assert.deepEqual(await reader.filterValues('creature', 'class', ''), ['Beast']);
+    assert.deepEqual(await reader.filterValues('item', 'type', '%'), [], 'LIKE wildcards match literally');
+    assert.equal(await reader.resolveFilterValue('item', 'rarity', ' super ELITE '), 'Super Elite');
+    assert.equal(await reader.resolveFilterValue('item', 'type', 'Shield'), null);
+
+    const statements = [];
+    const spy = createCatalogReader({ db: { query: async sql => { statements.push(sql); return []; } } });
+    for (const [kind, filters, page] of [
+        ['item', { class: 'Beast' }, 1], ['creature', { minLevel: -1 }, 1], ['item', { maxLevel: 1000001 }, 1], ['realm', { masterRealm: 0 }, 1],
+        ['item', { type: 'x'.repeat(65) }, 1], ['item', { type: 'a\nb' }, 1], ['item', {}, 0], ['item', {}, 10000], ['shop', {}, 1], ['item', [], 1],
+    ]) await assert.rejects(spy.browse(kind, filters, page), err => err instanceof CatalogError && err.code === 'invalid', JSON.stringify([kind, filters, page]));
+    await assert.rejects(spy.filterValues('realm', 'masterRealm', ''), err => err.code === 'invalid');
+    await assert.rejects(spy.resolveFilterValue('item', 'type', ''), err => err.code === 'invalid');
+    assert.deepEqual(statements, []);
+    assert.deepEqual(normalizeBrowseFilters('item', { rarity: 'Epic', type: undefined, minLevel: null }), { rarity: 'Epic' });
 });

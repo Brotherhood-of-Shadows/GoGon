@@ -1,8 +1,8 @@
 // catalog/catalogReader.js - specs/tasks/2026-11-guide-catalog-reader.md
-// Read-only views of the local catalog for the Discord guide and the owner dashboard. Search and
-// cards read serving rows through code-owned column lists and relation queries; caller text is
-// only ever a bound parameter. Nothing here reaches the game or guide.fallensword.com, and no
-// provenance, run or Guide-attempt state leaves this module.
+// Read-only views of the local catalog for the Discord guide and the owner dashboard. Search, cards
+// and browse lists (specs/tasks/2026-11-guide-browse.md) read serving rows through code-owned column
+// lists and relation queries; caller text is only ever a bound parameter. Nothing here reaches the
+// game or guide.fallensword.com, and no provenance, run or Guide-attempt state leaves this module.
 import { CatalogError } from '../_gg_data/handler/catalogStore.js';
 
 export const BROWSE_KINDS = Object.freeze(['item', 'creature', 'realm', 'master_realm', 'relic', 'quest']);
@@ -136,6 +136,87 @@ function searchHint(kind, row) {
     return parts.filter(Boolean).join(' • ').slice(0, 100);
 }
 
+// --- browse (specs/tasks/2026-11-guide-browse.md) ----------------------------------------------
+export const BROWSE_PAGE_SIZE = 10;
+export const MAX_BROWSE_PAGE = 9999;
+export const MAX_BROWSE_LEVEL = 1_000_000;
+const MAX_FILTER_TEXT = 64;
+
+const LEVELS = [{ key: 'minLevel', type: 'level' }, { key: 'maxLevel', type: 'level' }];
+/** Each kind's browse filters, in the order list state encodes them. */
+export const BROWSE_FILTERS = Object.freeze({
+    item: Object.freeze([{ key: 'rarity', type: 'text' }, { key: 'type', type: 'text' }, ...LEVELS]),
+    creature: Object.freeze([{ key: 'class', type: 'text' }, ...LEVELS]),
+    realm: Object.freeze([{ key: 'masterRealm', type: 'id' }, ...LEVELS]),
+    master_realm: Object.freeze([...LEVELS]),
+    relic: Object.freeze([{ key: 'realm', type: 'id' }]),
+    quest: Object.freeze([{ key: 'realm', type: 'id' }, ...LEVELS]),
+});
+
+// Code-owned SQL per kind: `match` fragments take exactly one bound value; `values` are the
+// columns whose distinct stored values autocomplete text filters. Item type/level and creature
+// class/level come from migration 023's indexed virtual columns.
+const BROWSE_SQL = Object.freeze({
+    item: { cols: 's.id, s.name, s.rarity, s.stats', from: 'items s', level: 's.stat_level',
+        match: { rarity: 's.rarity = ?', type: 's.stat_type = ?' }, values: { rarity: ['items', 'rarity'], type: ['items', 'stat_type'] } },
+    creature: { cols: 's.id, s.name, s.stats', from: 'creatures s', level: 's.stat_level',
+        match: { class: 's.stat_class = ?' }, values: { class: ['creatures', 'stat_class'] } },
+    realm: { cols: 's.id, s.name, s.min_level', from: 'realms s', level: 's.min_level', match: { masterRealm: 's.master_realm_id = ?' }, refs: { masterRealm: 'master_realms' } },
+    master_realm: { cols: 's.id, s.name, s.min_level', from: 'master_realms s', level: 's.min_level', match: {} },
+    relic: { cols: 's.id, s.name, s.realm_id, r.name AS realm_name', from: 'relics s LEFT JOIN realms r ON r.id = s.realm_id', level: null,
+        match: { realm: 's.realm_id = ?' }, refs: { realm: 'realms' }, order: 'r.name IS NULL, r.name, s.name, s.id' },
+    quest: { cols: 's.id, s.name, s.realm_id, s.min_level, r.name AS realm_name', from: 'quests s LEFT JOIN realms r ON r.id = s.realm_id', level: 's.min_level',
+        match: { realm: 's.realm_id = ?' }, refs: { realm: 'realms' } },
+});
+
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+const invalidFilter = (key, message) => new CatalogError('invalid', message, { field: key });
+
+/** Validated browse filters: only the kind's keys, levels ordered min <= max.
+ * @param {string} kind Catalog kind.
+ * @param {object} filters Raw filters.
+ * @returns {object} Normalized filters (unset keys omitted).
+ */
+export function normalizeBrowseFilters(kind, filters = {}) {
+    validKind(kind);
+    if (!filters || typeof filters !== 'object' || Array.isArray(filters)) throw invalidFilter('filters', 'Filters must be an object.');
+    const allowed = new Map(BROWSE_FILTERS[kind].map(filter => [filter.key, filter.type]));
+    const out = {};
+    for (const [key, value] of Object.entries(filters)) {
+        if (value === undefined || value === null) continue;
+        const type = allowed.get(key);
+        if (!type) throw invalidFilter(key, 'Unknown filter.');
+        if (type === 'text' && !(typeof value === 'string' && value.length >= 1 && value.length <= MAX_FILTER_TEXT && !CONTROL_CHARS.test(value))) throw invalidFilter(key, `Filter text must be 1-${MAX_FILTER_TEXT} characters.`);
+        if (type === 'id' && !(Number.isSafeInteger(value) && value >= 1)) throw invalidFilter(key, 'ID must be a positive integer.');
+        if (type === 'level' && !(Number.isSafeInteger(value) && value >= 0 && value <= MAX_BROWSE_LEVEL)) throw invalidFilter(key, `Level must be 0-${MAX_BROWSE_LEVEL}.`);
+        out[key] = value;
+    }
+    if (out.minLevel !== undefined && out.maxLevel !== undefined && out.minLevel > out.maxLevel) [out.minLevel, out.maxLevel] = [out.maxLevel, out.minLevel];
+    return out;
+}
+
+function browseWhere(kind, filters) {
+    const sql = BROWSE_SQL[kind];
+    const clauses = ['s.name IS NOT NULL'];
+    const params = [];
+    for (const { key } of BROWSE_FILTERS[kind]) {
+        if (filters[key] === undefined) continue;
+        if (key === 'minLevel') clauses.push(`${sql.level} >= ?`);
+        else if (key === 'maxLevel') clauses.push(`${sql.level} <= ?`);
+        else clauses.push(sql.match[key]);
+        params.push(filters[key]);
+    }
+    return { where: clauses.join(' AND '), params };
+}
+
+function valueColumn(kind, key) {
+    validKind(kind);
+    const column = BROWSE_SQL[kind].values?.[key];
+    if (!column) throw invalidFilter(key, 'This filter has no stored values.');
+    return column;
+}
+
 const SEARCH_SQL = Object.freeze({
     item: { cols: 's.id, s.name, s.rarity, s.stats', from: 'items s' },
     creature: { cols: 's.id, s.name, s.stats', from: 'creatures s' },
@@ -147,7 +228,8 @@ const SEARCH_SQL = Object.freeze({
 
 /**
  * @param {{db: {query: Function}}} deps Migrated catalog connection (read-only use).
- * @returns {{search: Function, findExact: Function, card: Function}} Reader.
+ * @returns {{search: Function, findExact: Function, card: Function, browse: Function, filterValues: Function,
+ *     resolveFilterValue: Function}} Reader.
  */
 export function createCatalogReader({ db }) {
     const searchResult = (kind, row) => ({ kind, id: Number(row.id), name: text(row.name) ?? `#${row.id}`, hint: searchHint(kind, row) });
@@ -311,6 +393,70 @@ export function createCatalogReader({ db }) {
                 ...await completenessOf(kind, row),
                 ...await builders[kind](fields),
             };
+        },
+
+        /** One page of a filtered list, in level-ascending order (entries without a level last).
+         * @param {string} kind Catalog kind.
+         * @param {object} [filters] BROWSE_FILTERS keys for the kind.
+         * @param {number} [page] 1-based page; past the end shows the last page.
+         * @returns {Promise<{kind: string, filters: object, filterNames: object, page: number, pages: number, total: number,
+         *     entries: Array<{kind: string, id: number, name: string, hint: string, incomplete: boolean}>}>} Page.
+         */
+        async browse(kind, filters = {}, page = 1) {
+            const normalized = normalizeBrowseFilters(kind, filters);
+            if (!Number.isSafeInteger(page) || page < 1 || page > MAX_BROWSE_PAGE) throw invalidFilter('page', `Page must be 1-${MAX_BROWSE_PAGE}.`);
+            const sql = BROWSE_SQL[kind];
+            const { where, params } = browseWhere(kind, normalized);
+            const [{ n }] = await db.query(`SELECT COUNT(*) AS n FROM ${sql.from} WHERE ${where}`, params);
+            const total = Number(n);
+            const pages = Math.max(1, Math.ceil(total / BROWSE_PAGE_SIZE));
+            const current = Math.min(page, pages);
+            const order = sql.order ?? `${sql.level} IS NULL, ${sql.level}, s.name, s.id`;
+            const rows = total ? await db.query(
+                `SELECT ${sql.cols} FROM ${sql.from} WHERE ${where} ORDER BY ${order} LIMIT ${BROWSE_PAGE_SIZE} OFFSET ${(current - 1) * BROWSE_PAGE_SIZE}`, params) : [];
+            const keys = rows.map(row => servingKey(kind, row));
+            const incomplete = new Set(keys.length
+                ? (await db.query(`SELECT entity_key FROM catalog_entities WHERE entity_kind = ? AND completeness = 'incomplete' AND entity_key IN (${keys.map(() => '?').join(', ')})`, [kind, ...keys]))
+                    .map(row => String(row.entity_key))
+                : []);
+            const filterNames = {};
+            for (const [key, table] of Object.entries(sql.refs ?? {})) {
+                if (normalized[key] === undefined) continue;
+                const [ref] = await db.query(`SELECT name FROM ${table} WHERE id = ?`, [normalized[key]]);
+                filterNames[key] = text(ref?.name) ?? `#${normalized[key]}`;
+            }
+            return {
+                kind, filters: normalized, filterNames, page: current, pages, total,
+                entries: rows.map((row, i) => ({ ...searchResult(kind, row), incomplete: incomplete.has(keys[i]) })),
+            };
+        },
+
+        /** Distinct stored values of a text filter containing the typed text (autocomplete).
+         * @param {string} kind Catalog kind.
+         * @param {string} key Text filter key (rarity, type, class).
+         * @param {string} typed 0-64 characters.
+         * @returns {Promise<string[]>} At most 25 values in stored spelling, alphabetical.
+         */
+        async filterValues(kind, key, typed) {
+            const [table, column] = valueColumn(kind, key);
+            if (typeof typed !== 'string' || typed.length > MAX_QUERY_LENGTH) throw invalidFilter(key, `Query must be at most ${MAX_QUERY_LENGTH} characters.`);
+            const rows = await db.query(`SELECT DISTINCT ${column} AS value FROM ${table} WHERE ${column} IS NOT NULL AND LOWER(${column}) LIKE ? ESCAPE '!' ORDER BY ${column} LIMIT ${MAX_SEARCH_RESULTS}`,
+                [likePattern(typed.trim().toLowerCase())]);
+            return rows.map(row => String(row.value));
+        },
+
+        /** The stored spelling of a text filter value typed in any case, or null when none matches.
+         * @param {string} kind Catalog kind.
+         * @param {string} key Text filter key.
+         * @param {string} value 1-64 characters.
+         * @returns {Promise<string|null>} Stored value.
+         */
+        async resolveFilterValue(kind, key, value) {
+            const [table, column] = valueColumn(kind, key);
+            const needle = typeof value === 'string' ? value.trim().toLowerCase() : '';
+            if (!needle || needle.length > MAX_FILTER_TEXT) throw invalidFilter(key, `Filter text must be 1-${MAX_FILTER_TEXT} characters.`);
+            const [row] = await db.query(`SELECT ${column} AS value FROM ${table} WHERE LOWER(${column}) = ? ORDER BY ${column} LIMIT 1`, [needle]);
+            return row ? String(row.value) : null;
         },
     };
 }

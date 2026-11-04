@@ -1,14 +1,20 @@
-// discord_modules/guide.js - specs/tasks/2026-11-discord-guide.md (AC-DISC-007)
-// /guide looks entries up in GoGon's own MySQL catalog (catalog/catalogReader.js); it never
+// discord_modules/guide.js - specs/tasks/2026-11-discord-guide.md (AC-DISC-007),
+// specs/tasks/2026-11-guide-browse.md (AC-DISC-008)
+// /guide looks entries up, and /guide browse lists them by filters, in GoGon's own MySQL catalog
+// (catalog/catalogReader.js); it never
 // requests guide.fallensword.com or the game. Replies are ephemeral to the requester; Share posts
 // the whole card publicly with its menus and stage buttons (owner request 2026-11-04). On a shared
 // message those open a private card for whoever clicks, so nobody changes the public post for
 // everyone. Every menu and button carries its target in its custom_id or option value, so
-// navigation needs no session state and survives a restart.
+// navigation needs no session state and survives a restart; a browse list carries its filters and
+// page in its button IDs the same way.
 import { SlashCommandBuilder, MessageFlags, ComponentType, ButtonStyle, escapeMarkdown } from 'discord.js';
 import { WARN, ERR } from '../app_modules/core.js';
 import { getConnection } from '../_gg_data/handler/gg_database.js';
-import { createCatalogReader, INCOMPLETE_REASON_LABELS, MAX_QUERY_LENGTH } from '../catalog/catalogReader.js';
+import {
+    createCatalogReader, INCOMPLETE_REASON_LABELS, MAX_QUERY_LENGTH, BROWSE_FILTERS, BROWSE_PAGE_SIZE, MAX_BROWSE_PAGE, MAX_BROWSE_LEVEL,
+    normalizeBrowseFilters,
+} from '../catalog/catalogReader.js';
 
 const SUBCOMMANDS = Object.freeze({ item: 'item', creature: 'creature', realm: 'realm', 'master-realm': 'master_realm', relic: 'relic', quest: 'quest' });
 const LABELS = Object.freeze({ item: 'Item', creature: 'Creature', realm: 'Realm', master_realm: 'Master realm', relic: 'Relic', quest: 'Quest' });
@@ -29,6 +35,7 @@ export const MESSAGES = Object.freeze({
     expired: 'This menu has expired. Run /guide again.',
     gone: 'That entry is no longer in the catalog.',
     shared: 'Shared to the channel.',
+    noPaging: 'Paging is unavailable for these filters.',
 });
 
 const RARITY_COLORS = { common: 0xffffff, rare: 0x00cccc, unique: 0xcc00cc, legendary: 0xffcc00, epic: 0x00cc00, crystalline: 0xfa9221, 'super elite': 0xcc0000 };
@@ -48,6 +55,146 @@ export const guideCommand = new SlashCommandBuilder()
 for (const [sub, kind] of Object.entries(SUBCOMMANDS)) {
     guideCommand.addSubcommand(command => command.setName(sub).setDescription(`Find a ${LABELS[kind].toLowerCase()} in the catalog.`)
         .addStringOption(option => option.setName('name').setDescription(`${LABELS[kind]} name`).setRequired(true).setAutocomplete(true).setMaxLength(100)));
+}
+
+// --- /guide browse (specs/tasks/2026-11-guide-browse.md) -------------------------------------------
+// Options per kind, in BROWSE_FILTERS order (the order list state is encoded in). `text` options
+// autocomplete stored values, `ref` options autocomplete entries of another kind, `level` options
+// are integers.
+const MIN_LEVEL = { name: 'min-level', key: 'minLevel', type: 'level', description: 'Lowest level to include' };
+const MAX_LEVEL = { name: 'max-level', key: 'maxLevel', type: 'level', description: 'Highest level to include' };
+export const BROWSE = Object.freeze({
+    item: { code: 'i', plural: 'Items', options: [
+        { name: 'rarity', key: 'rarity', type: 'text', description: 'Item rarity, e.g. Epic' },
+        { name: 'type', key: 'type', type: 'text', description: 'Item type, e.g. Helmet' }, MIN_LEVEL, MAX_LEVEL] },
+    creature: { code: 'c', plural: 'Creatures', options: [{ name: 'class', key: 'class', type: 'text', description: 'Creature class, e.g. Beast' }, MIN_LEVEL, MAX_LEVEL] },
+    realm: { code: 'r', plural: 'Realms', options: [{ name: 'master-realm', key: 'masterRealm', type: 'ref', ref: 'master_realm', description: 'Only realms of this master realm' }, MIN_LEVEL, MAX_LEVEL] },
+    master_realm: { code: 'm', plural: 'Master realms', options: [MIN_LEVEL, MAX_LEVEL] },
+    relic: { code: 'l', plural: 'Relics', options: [{ name: 'realm', key: 'realm', type: 'ref', ref: 'realm', description: 'Only relics in this realm' }] },
+    quest: { code: 'q', plural: 'Quests', options: [{ name: 'realm', key: 'realm', type: 'ref', ref: 'realm', description: 'Only quests in this realm' }, MIN_LEVEL, MAX_LEVEL] },
+});
+const KIND_BY_CODE = Object.freeze(Object.fromEntries(Object.entries(BROWSE).map(([kind, spec]) => [spec.code, kind])));
+const BROWSE_ID = /^guide:(b|bs):([icrmlq]):([1-9]\d{0,3}):([^:]*)$/;
+const FIELD = { id: /^[1-9]\d{0,17}$/, level: /^(?:0|[1-9]\d{0,6})$/ };
+const ESCAPED = { '%': '%25', ';': '%3B', ':': '%3A' };
+
+guideCommand.addSubcommandGroup(group => {
+    group.setName('browse').setDescription('List catalog entries by filters, 10 per page.');
+    for (const [sub, kind] of Object.entries(SUBCOMMANDS)) {
+        group.addSubcommand(command => {
+            command.setName(sub).setDescription(`List ${BROWSE[kind].plural.toLowerCase()} in the catalog, filtered and sorted by level.`);
+            for (const option of BROWSE[kind].options) {
+                if (option.type === 'level') command.addIntegerOption(o => o.setName(option.name).setDescription(option.description).setMinValue(0).setMaxValue(MAX_BROWSE_LEVEL));
+                else command.addStringOption(o => o.setName(option.name).setDescription(option.description).setAutocomplete(true).setMaxLength(100));
+            }
+            return command;
+        });
+    }
+    return group;
+});
+
+/** The custom_id of a browse list page ('b') or its Share button ('bs'), or null over 100 characters.
+ * @param {'b'|'bs'} action Paging or Share.
+ * @param {string} kind Catalog kind.
+ * @param {object} filters Normalized filters.
+ * @param {number} page 1-based page.
+ * @returns {string|null} custom_id.
+ */
+export function encodeBrowseId(action, kind, filters, page) {
+    const fields = BROWSE_FILTERS[kind].map(({ key, type }) => {
+        const value = filters[key];
+        if (value === undefined || value === null) return '';
+        return type === 'text' ? String(value).replace(/[%;:]/g, ch => ESCAPED[ch]) : String(value);
+    });
+    const id = `guide:${action}:${BROWSE[kind].code}:${page}:${fields.join(';')}`;
+    return id.length <= 100 ? id : null;
+}
+
+/** Parses a browse custom_id; null unless every part is valid.
+ * @param {string} customId Component custom_id.
+ * @returns {{action: 'browse'|'browseShare', kind: string, filters: object, page: number}|null} Parsed list state.
+ */
+export function decodeBrowseId(customId) {
+    const m = typeof customId === 'string' && customId.length <= 100 ? customId.match(BROWSE_ID) : null;
+    if (!m) return null;
+    const kind = KIND_BY_CODE[m[2]];
+    const page = Number(m[3]);
+    const fields = m[4].split(';');
+    const spec = BROWSE_FILTERS[kind];
+    if (fields.length !== spec.length || page > MAX_BROWSE_PAGE) return null;
+    const filters = {};
+    for (const [i, { key, type }] of spec.entries()) {
+        const raw = fields[i];
+        if (raw === '') continue;
+        if (type === 'text') {
+            if (/%(?!25|3B|3A)/.test(raw)) return null;
+            filters[key] = raw.replace(/%(25|3B|3A)/g, code => ({ '%25': '%', '%3B': ';', '%3A': ':' })[code]);
+        } else if (FIELD[type].test(raw) && Number.isSafeInteger(Number(raw))) filters[key] = Number(raw);
+        else return null;
+    }
+    try {
+        return { action: m[1] === 'bs' ? 'browseShare' : 'browse', kind, filters: normalizeBrowseFilters(kind, filters), page };
+    } catch {
+        return null;
+    }
+}
+
+function filterSummary(list) {
+    const parts = [];
+    for (const option of BROWSE[list.kind].options) {
+        const value = list.filters[option.key];
+        if (value === undefined || option.type === 'level') continue;
+        parts.push(option.type === 'ref' ? `${LABELS[option.ref]}: ${list.filterNames?.[option.key] ?? `#${value}`}` : String(value));
+    }
+    const { minLevel, maxLevel } = list.filters;
+    if (minLevel !== undefined && maxLevel !== undefined) parts.push(minLevel === maxLevel ? `Level ${minLevel}` : `Level ${minLevel}–${maxLevel}`);
+    else if (minLevel !== undefined) parts.push(`Level ${minLevel}+`);
+    else if (maxLevel !== undefined) parts.push(`Level up to ${maxLevel}`);
+    return parts.length ? parts.map(part => md(truncate(part, 100))).join(' • ') : 'All entries';
+}
+
+/** Renders one browse page as a Discord message body. Pure: no I/O.
+ * @param {object} list catalogReader.browse() result.
+ * @param {{shared?: boolean}} [options] Shared copies keep paging and the select but have no Share button.
+ * @returns {{embeds: object[], components: object[]}} Message body.
+ */
+export function renderBrowse(list, { shared = false } = {}) {
+    const spec = BROWSE[list.kind];
+    const offset = (list.page - 1) * BROWSE_PAGE_SIZE;
+    const lines = list.entries.slice(0, BROWSE_PAGE_SIZE).map((entry, i) => `**${offset + i + 1}.** ${md(truncate(entry.name, 100))}`
+        + `${entry.hint ? ` — ${md(entry.hint)}` : ''}${entry.incomplete ? ' • ⚠️ Incomplete' : ''}`);
+    const prev = encodeBrowseId('b', list.kind, list.filters, Math.max(1, list.page - 1));
+    const next = encodeBrowseId('b', list.kind, list.filters, Math.min(list.pages, list.page + 1));
+    const share = encodeBrowseId('bs', list.kind, list.filters, list.page);
+    const paging = Boolean(prev && next && share);
+    const description = [
+        `*${filterSummary(list)}*`,
+        lines.length ? lines.join('\n') : `No ${spec.plural.toLowerCase()} match these filters.`,
+        lines.length && !paging ? MESSAGES.noPaging : null,
+    ].filter(Boolean).join('\n\n');
+    const embed = fitEmbed({
+        title: spec.plural,
+        description,
+        color: KIND_COLORS[list.kind],
+        fields: [],
+        footer: { text: `GoGon catalog • Page ${list.page} of ${list.pages} • ${list.total} ${list.total === 1 ? 'match' : 'matches'}${shared ? ' • shared from /guide' : ''}` },
+    });
+    if (!lines.length) return { embeds: [embed], components: [] };
+    const components = [{ type: ComponentType.ActionRow, components: [{
+        type: ComponentType.StringSelect, custom_id: 'guide:bo', placeholder: 'Open an entry',
+        options: list.entries.slice(0, BROWSE_PAGE_SIZE).map(entry => ({
+            label: truncate(entry.name, 100), value: `${entry.kind}:${entry.id}`,
+            ...(entry.hint || entry.incomplete ? { description: truncate([entry.hint, entry.incomplete ? '⚠️ Incomplete' : null].filter(Boolean).join(' • '), 100) } : {}),
+        })),
+    }] }];
+    const buttons = [];
+    if (paging && list.pages > 1) {
+        buttons.push({ type: ComponentType.Button, style: ButtonStyle.Secondary, label: '◀', custom_id: prev, disabled: list.page <= 1 });
+        buttons.push({ type: ComponentType.Button, style: ButtonStyle.Secondary, label: '▶', custom_id: next, disabled: list.page >= list.pages });
+    }
+    if (paging && !shared) buttons.push({ type: ComponentType.Button, style: ButtonStyle.Primary, label: 'Share', custom_id: share });
+    if (buttons.length) components.push({ type: ComponentType.ActionRow, components: buttons });
+    return { embeds: [embed], components };
 }
 
 // --- rendering ------------------------------------------------------------------------------------
@@ -242,9 +389,15 @@ function choicePicker(text, results) {
 /** Parses a guide custom_id (and select value) into an action, or null when it is not valid.
  * @param {string} customId Component custom_id.
  * @param {string[]} [values] Selected values.
- * @returns {{action: string, kind: string, id: number, stage: number}|null} Parsed action.
+ * @returns {{action: string, kind: string, id?: number, stage?: number, filters?: object, page?: number}|null} Parsed action:
+ *     open/stage/share/browseOpen carry kind, id and stage; browse/browseShare carry kind, filters and page.
  */
 export function parseGuideCustomId(customId, values = []) {
+    if (customId === 'guide:bo') {
+        const value = typeof values?.[0] === 'string' ? values[0].match(VALUE) : null;
+        return value ? { action: 'browseOpen', kind: value[1], id: Number(value[2]), stage: 1 } : null;
+    }
+    if (typeof customId === 'string' && customId.startsWith('guide:b')) return decodeBrowseId(customId);
     const m = typeof customId === 'string' && customId.length <= 100 ? customId.match(CUSTOM_ID) : null;
     if (!m) return null;
     if (m[1] !== undefined) {
@@ -290,26 +443,91 @@ export function createGuideHandlers({
 } = {}) {
     const kindOf = interaction => SUBCOMMANDS[interaction.options.getSubcommand(false)] ?? null;
 
+    const isBrowse = interaction => interaction.options.getSubcommandGroup?.(false) === 'browse';
+    const entryChoices = results => results.slice(0, 25).map(r => ({
+        name: truncate(r.hint ? `${r.name} — ${r.hint}` : r.name, 100), value: `${r.kind}:${r.id}`,
+    }));
+
+    // Browse filters: stored values for text options, entries of the referenced kind for realm options.
+    async function browseChoices(kind, option, typed) {
+        const reader = await getReader();
+        if (option.type === 'ref') return entryChoices(await reader.search(option.ref, typed));
+        return (await reader.filterValues(kind, option.key, typed)).slice(0, 25).map(value => ({ name: truncate(value, 100), value: value.slice(0, 100) }));
+    }
+
     async function autocomplete(interaction) {
         const kind = kindOf(interaction);
-        let results = [];
+        let choices = [];
+        let what = kind ?? 'unknown kind';
         try {
-            if (kind) {
+            if (kind && isBrowse(interaction)) {
+                const focused = interaction.options.getFocused(true);
+                const option = BROWSE[kind].options.find(o => o.name === focused?.name && o.type !== 'level');
+                if (option) {
+                    what = `browse ${kind} ${option.name}`;
+                    choices = await withDeadline(browseChoices(kind, option, String(focused.value ?? '').slice(0, MAX_QUERY_LENGTH)), autocompleteDeadlineMs);
+                }
+            } else if (kind) {
                 const typed = String(interaction.options.getFocused() ?? '').slice(0, MAX_QUERY_LENGTH);
-                results = await withDeadline((async () => (await getReader()).search(kind, typed))(), autocompleteDeadlineMs);
+                choices = entryChoices(await withDeadline((async () => (await getReader()).search(kind, typed))(), autocompleteDeadlineMs));
             }
         } catch (error) {
-            log.warn(`Autocomplete for ${kind ?? 'unknown kind'} returned no choices (${error?.code === 'deadline' ? 'deadline exceeded' : 'catalog unavailable'}).`);
-            results = [];
+            log.warn(`Autocomplete for ${what} returned no choices (${error?.code === 'deadline' ? 'deadline exceeded' : 'catalog unavailable'}).`);
+            choices = [];
         }
-        await interaction.respond(results.slice(0, 25).map(r => ({
-            name: truncate(r.hint ? `${r.name} — ${r.hint}` : r.name, 100), value: `${r.kind}:${r.id}`,
-        })));
+        await interaction.respond(choices);
+    }
+
+    const notice = content => ({ content, embeds: [], components: [] });
+
+    // Reads the browse options into reader filters; a string is a notice to show instead of a list.
+    async function browseFilters(kind, interaction, reader) {
+        const filters = {};
+        for (const option of BROWSE[kind].options) {
+            if (option.type === 'level') {
+                const value = interaction.options.getInteger(option.name);
+                if (Number.isSafeInteger(value)) filters[option.key] = value;
+                continue;
+            }
+            const typed = String(interaction.options.getString(option.name) ?? '').trim();
+            if (!typed) continue;
+            const shown = md(truncate(typed, 64));
+            if (option.type === 'text') {
+                const stored = typed.length <= 64 ? await reader.resolveFilterValue(kind, option.key, typed) : null;
+                if (stored === null) return `No ${LABELS[kind].toLowerCase()} has the ${option.name} “${shown}”.`;
+                filters[option.key] = stored;
+                continue;
+            }
+            const refLabel = LABELS[option.ref].toLowerCase();
+            const picked = typed.match(VALUE);
+            if (picked && picked[1] === option.ref) {
+                filters[option.key] = Number(picked[2]);
+                continue;
+            }
+            const matches = typed.length <= MAX_QUERY_LENGTH ? await reader.findExact(option.ref, typed) : [];
+            if (!matches.length) return `No ${refLabel} named “${shown}”.`;
+            if (matches.length > 1) return `Several ${refLabel}s are named “${shown}”; pick one from the list.`;
+            filters[option.key] = matches[0].id;
+        }
+        return filters;
+    }
+
+    async function browseCommand(interaction, kind) {
+        try {
+            const reader = await getReader();
+            const filters = await browseFilters(kind, interaction, reader);
+            if (typeof filters === 'string') return await interaction.editReply(notice(filters));
+            return await interaction.editReply(renderBrowse(await reader.browse(kind, filters, 1)));
+        } catch (error) {
+            log.error(`Browse failed for ${kind} (${error?.code ?? 'error'}).`);
+            return interaction.editReply(notice(MESSAGES.unavailable));
+        }
     }
 
     async function command(interaction) {
         const kind = kindOf(interaction);
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+        if (kind && isBrowse(interaction)) return browseCommand(interaction, kind);
         try {
             const typed = String(interaction.options.getString('name', true)).trim();
             const reader = await getReader();
@@ -356,13 +574,19 @@ export function createGuideHandlers({
         const timing = { delivered: Math.max(0, now() - clickedAt), read: 0, respond: 0, deferred: false };
         const parsed = parseGuideCustomId(interaction.customId, interaction.values);
         if (!parsed) return interaction.reply(ephemeral({ content: MESSAGES.expired }));
-        const mode = parsed.action === 'share' ? 'public' : onPrivateCard(interaction) ? 'update' : 'ephemeral';
-        const label = `${parsed.action} ${parsed.kind}`;
+        const list = parsed.action === 'browse' || parsed.action === 'browseShare';
+        const mode = parsed.action === 'share' || parsed.action === 'browseShare' ? 'public'
+            : parsed.action === 'browseOpen' || !onPrivateCard(interaction) ? 'ephemeral' : 'update';
+        const label = `${{ browse: 'page', browseShare: 'share', browseOpen: 'open' }[parsed.action] ?? parsed.action} ${parsed.kind}`;
+        const render = (found, shared) => (list ? renderBrowse(found, { shared }) : renderCard(found, { stage: parsed.stage, shared }));
         let phase = 'read';
         let started = now();
         let timer;
         try {
-            const read = (async () => (await getReader()).card(parsed.kind, parsed.id))();
+            const read = (async () => {
+                const reader = await getReader();
+                return list ? reader.browse(parsed.kind, parsed.filters, parsed.page) : reader.card(parsed.kind, parsed.id);
+            })();
             read.catch(() => {}); // handled below; keeps an early acknowledgement from leaving it unobserved
             const first = await Promise.race([read, new Promise(resolve => { timer = setTimeout(resolve, Math.max(0, ackDeadlineMs - timing.delivered), DEFER); })]);
             clearTimeout(timer);
@@ -379,14 +603,14 @@ export function createGuideHandlers({
             started = now();
             if (!card) await sendNotice(interaction, mode, timing.deferred, MESSAGES.gone);
             else if (mode === 'public') {
-                await sendCard(interaction, mode, timing.deferred, { ...renderCard(card, { stage: parsed.stage, shared: true }), ...noMentions });
+                await sendCard(interaction, mode, timing.deferred, { ...render(card, true), ...noMentions });
                 await interaction.followUp(ephemeral({ content: MESSAGES.shared }));
-            } else await sendCard(interaction, mode, timing.deferred, renderCard(card, { stage: parsed.stage }));
+            } else await sendCard(interaction, mode, timing.deferred, render(card, false));
             timing.respond = now() - started;
         } catch (error) {
             clearTimeout(timer);
             if (phase === 'read') {
-                log.error(`Navigation failed for ${parsed.kind} (${error?.code ?? 'error'}).`);
+                log.error(`${list ? 'Browse' : 'Navigation'} failed for ${parsed.kind} (${error?.code ?? 'error'}).`);
                 return sendNotice(interaction, mode, timing.deferred, MESSAGES.unavailable).catch(() => {});
             }
             // 10062 (unknown interaction) means Discord had already given up on the click.
@@ -402,9 +626,9 @@ export function createGuideHandlers({
 }
 
 const handlers = createGuideHandlers();
-/** Discord autocomplete for /guide name options. */
+/** Discord autocomplete for /guide name options and /guide browse filters. */
 export const handleGuideAutocomplete = interaction => handlers.autocomplete(interaction);
-/** The /guide slash command. */
+/** The /guide slash command, including /guide browse. */
 export const handleGuideCommand = interaction => handlers.command(interaction);
 /** /guide menus and buttons (custom_id prefix "guide:"). */
 export const handleGuideComponent = interaction => handlers.component(interaction);

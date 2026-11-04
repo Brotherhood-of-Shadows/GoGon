@@ -18,6 +18,8 @@
 // migration 007 sees the allow-lists a fresh database has. SQLite cannot drop or add a CHECK on an
 // existing table, so replacing one on an upgraded database is covered on the real-MySQL run only
 // (CAT-TASK-009); a CHECK added through ALTER TABLE ... ADD COLUMN is enforced but not listed.
+// Migration 023's guarded JSON_TYPE(JSON_EXTRACT(..)) = 'INTEGER'|'STRING' and JSON_VALUE forms are
+// translated to SQLite's json_type/json_extract (see translateJson); other forms throw.
 import { DatabaseSync } from 'node:sqlite';
 
 /** Shared state, like one MySQL server per test process: databases survive pool.end(). */
@@ -143,12 +145,30 @@ export function translate(sql) {
             return '';
         });
     }
+    s = translateJson(s, sql);
     const dropIndex = s.match(/^ALTER\s+TABLE\s+`?\w+`?\s+DROP\s+(?:INDEX|KEY)\s+`?(\w+)`?$/i);
     if (dropIndex) return [`DROP INDEX ${dropIndex[1]}`];
     s = s.replace(/\s+FOR\s+UPDATE\s*$/i, '');
     s = s.replace(/^INSERT\s+IGNORE\b/i, 'INSERT OR IGNORE');
     if (/\b(AUTO_INCREMENT|ENGINE\s*=|UNSIGNED)\b/i.test(s)) throw untranslatable(sql, 'MySQL-only syntax');
     return [s, ...extra];
+}
+
+// MySQL JSON_TYPE names a type in capitals ('INTEGER', 'STRING'); SQLite's json_type(x, path) uses
+// 'integer' and 'text'. JSON_VALUE does not exist in SQLite; on a value whose JSON type was already
+// checked (migration 023 always checks first) json_extract returns the same scalar. Only these two
+// guarded forms are translated; any other JSON_TYPE/JSON_VALUE use throws instead of silently
+// meaning something else on SQLite (the translation emits lower-case json_type).
+const JSON_PATH = String.raw`'\$(?:\.\w+)+'`;
+const JSON_TYPE_CHECK = new RegExp(String.raw`\bJSON_TYPE\(JSON_EXTRACT\(([\w.]+), (${JSON_PATH})\)\) = '(INTEGER|STRING)'`, 'g');
+const JSON_VALUE_CALL = new RegExp(String.raw`\bJSON_VALUE\(([\w.]+), (${JSON_PATH})(?: RETURNING SIGNED)?\)`, 'g');
+function translateJson(s, sql) {
+    const leftover = text => /\bJSON_VALUE\b/i.test(text) || /\bJSON_TYPE\b/.test(text);
+    if (!leftover(s)) return s;
+    const out = s.replace(JSON_TYPE_CHECK, (_, column, path, type) => `json_type(${column}, ${path}) = '${type === 'INTEGER' ? 'integer' : 'text'}'`)
+        .replace(JSON_VALUE_CALL, (_, column, path) => `json_extract(${column}, ${path})`);
+    if (leftover(out)) throw untranslatable(sql, 'a JSON_TYPE/JSON_VALUE form other than the guarded ones in migration 023');
+    return out;
 }
 
 function bindable(value, sql) {

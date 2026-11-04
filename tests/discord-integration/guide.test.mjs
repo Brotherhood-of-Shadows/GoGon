@@ -1,4 +1,5 @@
-// tests/discord-integration/guide.test.mjs - specs/tasks/2026-11-discord-guide.md (AC-DISC-007)
+// tests/discord-integration/guide.test.mjs - specs/tasks/2026-11-discord-guide.md (AC-DISC-007),
+// specs/tasks/2026-11-guide-browse.md (AC-DISC-008)
 // /guide handlers and rendering with fixture interactions and a fake catalog reader, plus one pass
 // through the real reader on the test database. Nothing reaches Discord, the game or the guide site.
 import { test, after } from 'node:test';
@@ -6,9 +7,11 @@ import assert from 'node:assert/strict';
 import { MessageFlags, MessageFlagsBitField, ComponentType } from 'discord.js';
 import { readFileSync } from 'node:fs';
 import { parseHTML } from 'linkedom';
-import { createGuideHandlers, renderCard, parseGuideCustomId, splitStageText, MESSAGES } from '../../discord_modules/guide.js';
+import {
+    createGuideHandlers, renderCard, renderBrowse, parseGuideCustomId, splitStageText, encodeBrowseId, decodeBrowseId, guideCommand, BROWSE, MESSAGES,
+} from '../../discord_modules/guide.js';
 import { parseQuestDetail } from '../../catalog/guideParsers.js';
-import { createCatalogReader } from '../../catalog/catalogReader.js';
+import { createCatalogReader, BROWSE_FILTERS } from '../../catalog/catalogReader.js';
 import { freshClient, closeClients } from '../helpers/db-client.mjs';
 
 after(closeClients);
@@ -347,6 +350,276 @@ test('end to end on the catalog database: autocomplete, then the card, without a
         assert.equal(embed.title, 'Twangy’s Axe');
         assert.equal(embed.fields[0].value, 'Attack: +16940');
         assert.equal(chosen.out[1][1].components[0].components[0].type, ComponentType.Button);
+    } finally { globalThis.fetch = realFetch; }
+    assert.deepEqual(fetches, []);
+});
+
+// --- /guide browse (specs/tasks/2026-11-guide-browse.md) ---------------------------------------------
+
+const helms = (page, count) => Array.from({ length: count }, (_, i) => ({
+    kind: 'item', id: 1000 + (page - 1) * 10 + i, name: `Helm ${(page - 1) * 10 + i + 1}`, hint: 'Helmet • Epic • Lvl 1000', incomplete: i === 0,
+}));
+function list(page = 1, overrides = {}) {
+    return { kind: 'item', filters: { rarity: 'Epic', type: 'Helmet', minLevel: 1000, maxLevel: 3000 }, filterNames: {}, page, pages: 3, total: 25, entries: helms(page, page === 3 ? 5 : 10), ...overrides };
+}
+
+function browseReader(overrides = {}) {
+    return fakeReader({
+        browse: async (kind, filters, page) => (kind === 'item' ? list(Math.min(page, 3), { filters }) : { kind, filters, filterNames: {}, page: 1, pages: 1, total: 0, entries: [] }),
+        filterValues: async () => ['Helmet', 'Helmet of Doom'],
+        resolveFilterValue: async (kind, key, value) => ({ epic: 'Epic', helmet: 'Helmet' })[value.toLowerCase()] ?? null,
+        ...overrides,
+    });
+}
+
+function browseInteraction({ sub = 'item', strings = {}, integers = {}, focused, ...rest } = {}) {
+    const i = interaction({ sub, ...rest });
+    i.options = {
+        getSubcommandGroup: () => 'browse', getSubcommand: () => sub,
+        getString: name => strings[name] ?? null, getInteger: name => integers[name] ?? null,
+        getFocused: full => (full ? focused : focused?.value),
+    };
+    return i;
+}
+const select = body => body.components[0].components[0];
+const buttons = body => body.components[1]?.components ?? [];
+
+test('AC-DISC-008 AC-1: /guide browse has one subcommand per kind with its filters, in list-state order', () => {
+    const json = guideCommand.toJSON();
+    const browse = json.options.find(o => o.name === 'browse');
+    assert.equal(browse.type, 2, 'subcommand group');
+    const shape = Object.fromEntries(browse.options.map(sub => [sub.name, sub.options.map(o => [o.name, o.type, o.autocomplete ?? false, o.min_value ?? null, o.max_value ?? null, o.required ?? false])]));
+    const level = name => [name, 4, false, 0, 1000000, false];
+    assert.deepEqual(shape, {
+        item: [['rarity', 3, true, null, null, false], ['type', 3, true, null, null, false], level('min-level'), level('max-level')],
+        creature: [['class', 3, true, null, null, false], level('min-level'), level('max-level')],
+        realm: [['master-realm', 3, true, null, null, false], level('min-level'), level('max-level')],
+        'master-realm': [level('min-level'), level('max-level')],
+        relic: [['realm', 3, true, null, null, false]],
+        quest: [['realm', 3, true, null, null, false], level('min-level'), level('max-level')],
+    });
+    for (const [kind, spec] of Object.entries(BROWSE)) assert.deepEqual(spec.options.map(o => o.key), BROWSE_FILTERS[kind].map(f => f.key), kind);
+    assert.deepEqual(json.options.filter(o => o.type === 1).map(o => o.name), ['item', 'creature', 'realm', 'master-realm', 'relic', 'quest'], 'look-up subcommands unchanged');
+});
+
+test('AC-DISC-008 AC-7: list state round-trips through custom_ids and anything malformed expires', () => {
+    const states = [
+        ['item', { rarity: 'Super Elite', type: 'Odd;Type:50%', minLevel: 0, maxLevel: 1000000 }, 9999],
+        ['creature', { class: 'Beast' }, 2], ['realm', { masterRealm: 5, maxLevel: 10 }, 1], ['master_realm', {}, 1],
+        ['relic', { realm: 9007199254740991 }, 3], ['quest', { realm: 9, minLevel: 1 }, 4],
+    ];
+    for (const [kind, filters, page] of states) {
+        for (const action of ['b', 'bs']) {
+            const id = encodeBrowseId(action, kind, filters, page);
+            assert.ok(id.length <= 100, id);
+            assert.deepEqual(parseGuideCustomId(id), { action: action === 'b' ? 'browse' : 'browseShare', kind, filters, page }, id);
+        }
+    }
+    assert.equal(encodeBrowseId('b', 'item', { type: 'Odd;Type:50%' }, 1), 'guide:b:i:1:;Odd%3BType%3A50%25;;');
+    assert.equal(encodeBrowseId('b', 'item', { rarity: 'R'.repeat(64), type: 'T'.repeat(64) }, 1), null, 'over 100 characters');
+    assert.deepEqual(decodeBrowseId('guide:b:i:2:;;1500;1000').filters, { minLevel: 1000, maxLevel: 1500 });
+    assert.deepEqual(parseGuideCustomId('guide:bo', ['quest:51']), { action: 'browseOpen', kind: 'quest', id: 51, stage: 1 });
+    for (const [bad, values] of [['guide:b:x:1:'], ['guide:b:i:0:;;;'], ['guide:b:i:10000:;;;'], ['guide:b:i:1:;;'], ['guide:b:i:1:;;;;'], ['guide:b:i:1:a%41;;;'],
+        ['guide:b:i:1:a\nb;;;'], ['guide:b:i:1:;;1000001;'], ['guide:b:i:1:;;-1;'], ['guide:b:r:1:abc;;'], ['guide:b:r:1:0;;'], ['guide:b:l:1:1:2'],
+        [`guide:b:i:1:${'x'.repeat(65)};;;`], [`guide:b:c:1:${'x'.repeat(95)};;`], ['guide:bx:i:1:;;;'], ['guide:bo', ['item:abc']], ['guide:bo', []]]) {
+        assert.equal(parseGuideCustomId(bad, values), null, bad);
+    }
+});
+
+test('AC-DISC-008 AC-3/AC-5/AC-10: a list page shows numbered entries, filters, counts, the open menu and paging', () => {
+    const first = renderBrowse(list(1, { filterNames: {} }));
+    const [embed] = first.embeds;
+    assert.equal(embed.title, 'Items');
+    const lines = embed.description.split('\n');
+    assert.equal(lines[0], '*Epic • Helmet • Level 1000–3000*');
+    assert.equal(lines[2], '**1.** Helm 1 — Helmet • Epic • Lvl 1000 • ⚠️ Incomplete');
+    assert.equal(lines[3], '**2.** Helm 2 — Helmet • Epic • Lvl 1000');
+    assert.equal(embed.footer.text, 'GoGon catalog • Page 1 of 3 • 25 matches');
+    assert.equal(select(first).custom_id, 'guide:bo');
+    assert.equal(select(first).options.length, 10);
+    assert.deepEqual(select(first).options[0], { label: 'Helm 1', value: 'item:1000', description: 'Helmet • Epic • Lvl 1000 • ⚠️ Incomplete' });
+    assert.deepEqual(buttons(first).map(b => [b.label, b.custom_id, b.disabled ?? false]), [
+        ['◀', 'guide:b:i:1:Epic;Helmet;1000;3000', true], ['▶', 'guide:b:i:2:Epic;Helmet;1000;3000', false], ['Share', 'guide:bs:i:1:Epic;Helmet;1000;3000', false]]);
+
+    const last = renderBrowse(list(3));
+    assert.match(last.embeds[0].description, /^\*\*21\.\*\* Helm 21/m);
+    assert.deepEqual(buttons(last).map(b => [b.custom_id, b.disabled ?? false]).slice(0, 2), [['guide:b:i:2:Epic;Helmet;1000;3000', false], ['guide:b:i:3:Epic;Helmet;1000;3000', true]]);
+
+    const single = renderBrowse(list(1, { pages: 1, total: 1, entries: helms(1, 1), filters: {} }));
+    assert.deepEqual(buttons(single).map(b => b.label), ['Share'], 'one page: no ◀ ▶');
+    assert.match(single.embeds[0].description, /^\*All entries\*/);
+    assert.equal(single.embeds[0].footer.text, 'GoGon catalog • Page 1 of 1 • 1 match');
+
+    const quests = renderBrowse({ kind: 'quest', filters: { realm: 9, minLevel: 5 }, filterNames: { realm: 'Mountain_Path' }, page: 1, pages: 1, total: 0, entries: [] });
+    assert.match(quests.embeds[0].description, /^\*Realm: Mountain\\_Path • Level 5\+\*\n\nNo quests match these filters\.$/);
+    assert.deepEqual(quests.components, []);
+
+    const shared = renderBrowse(list(2), { shared: true });
+    assert.deepEqual(buttons(shared).map(b => b.label), ['◀', '▶']);
+    assert.match(shared.embeds[0].footer.text, / • shared from \/guide$/);
+
+    const long = renderBrowse(list(1, { filters: { rarity: 'R'.repeat(64), type: 'T'.repeat(64) },
+        entries: helms(1, 10).map(e => ({ ...e, name: 'N'.repeat(300), hint: 'H'.repeat(100) })) }));
+    assert.deepEqual(buttons(long), [], 'state that cannot fit in a custom_id has no paging or Share');
+    assert.match(long.embeds[0].description, new RegExp(`${MESSAGES.noPaging.replace('.', '\\.')}$`));
+    assert.ok(long.embeds[0].description.length <= 4096);
+    assert.ok(select(long).options.every(o => o.label.length <= 100 && o.description.length <= 100));
+});
+
+test('AC-DISC-008 AC-2: browse autocomplete offers stored filter values or realms, and nothing on failure', async () => {
+    const { reader, calls } = browseReader({
+        filterValues: async (kind, key, typed) => { calls.push(['filterValues', kind, key, typed]); return Array.from({ length: 30 }, (_, n) => `Value ${n}`); },
+        search: async (kind, typed) => { calls.push(['search', kind, typed]); return [{ kind, id: 9, name: 'Mountain Path', hint: 'Lvl 1' }]; },
+    });
+    const h = handlers(reader);
+    const type = browseInteraction({ focused: { name: 'type', value: 'hel' } });
+    await h.autocomplete(type);
+    assert.equal(type.out[0][1].length, 25);
+    assert.deepEqual(type.out[0][1][0], { name: 'Value 0', value: 'Value 0' });
+    const realm = browseInteraction({ sub: 'quest', focused: { name: 'realm', value: 'moun' } });
+    await h.autocomplete(realm);
+    assert.deepEqual(realm.out, [['respond', [{ name: 'Mountain Path — Lvl 1', value: 'realm:9' }]]]);
+    const master = browseInteraction({ sub: 'realm', focused: { name: 'master-realm', value: 'el' } });
+    await h.autocomplete(master);
+    assert.deepEqual(calls, [['filterValues', 'item', 'type', 'hel'], ['search', 'realm', 'moun'], ['search', 'master_realm', 'el']]);
+
+    for (const filterValues of [async () => { throw new Error('down'); }, () => new Promise(() => {})]) {
+        const failing = handlers(browseReader({ filterValues }).reader, { autocompleteDeadlineMs: 20 });
+        const i = browseInteraction({ focused: { name: 'rarity', value: 'secret typed text' } });
+        await failing.autocomplete(i);
+        assert.deepEqual(i.out, [['respond', []]]);
+        assert.equal(failing.logs.length, 1);
+        assert.match(failing.logs[0][1], /^Autocomplete for browse item rarity returned no choices/);
+        assert.doesNotMatch(failing.logs[0][1], /secret typed text/);
+    }
+});
+
+test('AC-DISC-008 AC-3/AC-4: the browse command resolves its filters, then replies privately with page 1', async () => {
+    const seen = [];
+    const { reader } = browseReader({
+        browse: async (kind, filters, page) => { seen.push([kind, filters, page]); return list(1, { filters }); },
+        findExact: async (kind, name) => (name === 'twins' ? [{ kind, id: 1 }, { kind, id: 2 }] : name === 'Mountain Path' ? [{ kind, id: 9 }] : []),
+    });
+    const h = handlers(reader);
+    const run = async options => { const i = browseInteraction(options); await h.command(i); return i; };
+
+    const item = await run({ strings: { rarity: ' epic ', type: 'HELMET' }, integers: { 'min-level': 1000 } });
+    assert.deepEqual(item.out[0], ['deferReply', { flags: MessageFlags.Ephemeral }]);
+    assert.equal(item.out[1][1].embeds[0].title, 'Items');
+    assert.deepEqual(seen.pop(), ['item', { rarity: 'Epic', type: 'Helmet', minLevel: 1000 }, 1]);
+
+    await run({ sub: 'quest', strings: { realm: 'realm:9' } });
+    assert.deepEqual(seen.pop(), ['quest', { realm: 9 }, 1]);
+    await run({ sub: 'relic', strings: { realm: 'Mountain Path' } });
+    assert.deepEqual(seen.pop(), ['relic', { realm: 9 }, 1]);
+    await run({ sub: 'master-realm', integers: { 'max-level': 50 } });
+    assert.deepEqual(seen.pop(), ['master_realm', { maxLevel: 50 }, 1]);
+
+    const unknown = await run({ strings: { type: 'Spoon' } });
+    assert.equal(unknown.out[1][1].content, 'No item has the type “Spoon”.');
+    const noRealm = await run({ sub: 'quest', strings: { realm: 'Nowhere' } });
+    assert.equal(noRealm.out[1][1].content, 'No realm named “Nowhere”.');
+    const several = await run({ sub: 'quest', strings: { realm: 'twins' } });
+    assert.equal(several.out[1][1].content, 'Several realms are named “twins”; pick one from the list.');
+    assert.equal(seen.length, 0, 'no list read for a filter that did not resolve');
+
+    const down = handlers(browseReader({ browse: async () => { throw Object.assign(new Error('down'), { code: 'ECONNREFUSED' }); } }).reader);
+    const failed = browseInteraction({ strings: { type: 'helmet' } });
+    await down.command(failed);
+    assert.equal(failed.out[1][1].content, MESSAGES.unavailable);
+    assert.deepEqual(down.logs, [['error', 'Browse failed for item (ECONNREFUSED).']]);
+});
+
+test('AC-DISC-008 AC-5/AC-6: paging edits the private list, shared lists answer privately, Share posts publicly, the menu opens a new card', async () => {
+    const { reader, calls } = browseReader();
+    const h = handlers(reader);
+    const next = interaction({ customId: 'guide:b:i:2:Epic;Helmet;1000;3000' });
+    await h.component(next);
+    assert.equal(next.out[0][0], 'update');
+    assert.match(next.out[0][1].embeds[0].footer.text, /Page 2 of 3/);
+
+    const share = interaction({ customId: 'guide:bs:i:2:Epic;Helmet;1000;3000' });
+    await h.component(share);
+    assert.equal(share.out[0][0], 'reply');
+    assert.equal(share.out[0][1].flags, undefined, 'public');
+    assert.deepEqual(share.out[0][1].allowedMentions, { parse: [] });
+    assert.deepEqual(buttons(share.out[0][1]).map(b => b.label), ['◀', '▶']);
+    assert.equal(select(share.out[0][1]).custom_id, 'guide:bo');
+    assert.deepEqual(share.out[1], ['followUp', { content: MESSAGES.shared, flags: MessageFlags.Ephemeral }]);
+
+    const onPost = interaction({ customId: 'guide:b:i:3:Epic;Helmet;1000;3000', onShared: true });
+    await h.component(onPost);
+    assert.equal(onPost.out.length, 1);
+    assert.deepEqual([onPost.out[0][0], onPost.out[0][1].flags], ['reply', MessageFlags.Ephemeral]);
+    assert.ok(buttons(onPost.out[0][1]).some(b => b.label === 'Share'), 'the private copy can be shared again');
+
+    for (const onShared of [false, true]) {
+        const open = interaction({ customId: 'guide:bo', values: ['item:17070'], onShared });
+        await h.component(open);
+        assert.deepEqual([open.out.length, open.out[0][0], open.out[0][1].flags, open.out[0][1].embeds[0].title], [1, 'reply', MessageFlags.Ephemeral, 'Twangy’s Axe'],
+            'the list stays; the card arrives as a new private reply');
+    }
+    assert.deepEqual(calls.filter(c => c[0] === 'card'), [['card', 'item', 17070], ['card', 'item', 17070]]);
+
+    const gone = interaction({ customId: 'guide:bo', values: ['item:424242'] });
+    await h.component(gone);
+    assert.deepEqual(gone.out, [['reply', { content: MESSAGES.gone, flags: MessageFlags.Ephemeral }]]);
+});
+
+test('AC-DISC-008 AC-8: slow list reads are acknowledged early; outages log the kind only', async () => {
+    const slowBrowse = (ms, error) => async (kind, filters, page) => {
+        await new Promise(resolve => setTimeout(resolve, ms));
+        if (error) throw error;
+        return list(page, { filters });
+    };
+    const fast = { ackDeadlineMs: 10, slowResponseMs: 5 };
+    const own = handlers(browseReader({ browse: slowBrowse(40) }).reader, fast);
+    const click = interaction({ customId: 'guide:b:i:2:Epic;Secret%3BType;;' });
+    await own.component(click);
+    assert.deepEqual(click.out.map(e => e[0]), ['deferUpdate', 'editReply']);
+    assert.match(own.logs[0][1], /^Slow page item: reached GoGon \d+ ms after the click/);
+    assert.doesNotMatch(own.logs.join(), /Epic|Secret/);
+
+    const share = handlers(browseReader({ browse: slowBrowse(40) }).reader, fast);
+    const shareClick = interaction({ customId: 'guide:bs:i:1:Epic;;;' });
+    await share.component(shareClick);
+    assert.deepEqual(shareClick.out.map(e => e[0]), ['deferReply', 'editReply', 'followUp']);
+    assert.match(share.logs[0][1], /^Slow share item/);
+
+    const down = handlers(browseReader({ browse: slowBrowse(0, Object.assign(new Error('down'), { code: 'ER_X' })) }).reader);
+    const failed = interaction({ customId: 'guide:b:q:1:9;;' });
+    await down.component(failed);
+    assert.deepEqual(failed.out, [['reply', { content: MESSAGES.unavailable, flags: MessageFlags.Ephemeral }]]);
+    assert.deepEqual(down.logs, [['error', 'Browse failed for quest (ER_X).']]);
+
+    const { reader, calls } = browseReader();
+    const expired = interaction({ customId: 'guide:b:i:0:;;;' });
+    await handlers(reader).component(expired);
+    assert.deepEqual(expired.out, [['reply', { content: MESSAGES.expired, flags: MessageFlags.Ephemeral }]]);
+    assert.deepEqual(calls, []);
+});
+
+test('AC-DISC-008 end to end on the catalog database: filter autocomplete, list, next page, without any network request', async () => {
+    const db = await freshClient();
+    for (let n = 1; n <= 12; n++) await db.query('INSERT INTO items (id, name, rarity, stats) VALUES (?, ?, ?, ?)', [40000 + n, `Helm ${n}`, 'Epic', JSON.stringify({ type: 'Helmet', level: n * 10 })]);
+    await db.query('INSERT INTO items (id, name, rarity, stats) VALUES (?, ?, ?, ?)', [40100, 'Ring', 'Rare', JSON.stringify({ type: 'Ring', level: 5 })]);
+    const fetches = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (...args) => { fetches.push(args); throw new Error('network blocked'); };
+    try {
+        const h = handlers(createCatalogReader({ db }));
+        const typing = browseInteraction({ focused: { name: 'type', value: 'hel' } });
+        await h.autocomplete(typing);
+        assert.deepEqual(typing.out, [['respond', [{ name: 'Helmet', value: 'Helmet' }]]]);
+        const command = browseInteraction({ strings: { type: 'Helmet' }, integers: { 'min-level': 20 } });
+        await h.command(command);
+        const body = command.out[1][1];
+        assert.equal(body.embeds[0].footer.text, 'GoGon catalog • Page 1 of 2 • 11 matches');
+        assert.match(body.embeds[0].description, /^\*\*1\.\*\* Helm 2 — Helmet • Epic • Lvl 20$/m);
+        const next = interaction({ customId: buttons(body).find(b => b.label === '▶').custom_id });
+        await h.component(next);
+        assert.equal(next.out[0][0], 'update');
+        assert.match(next.out[0][1].embeds[0].description, /^\*\*11\.\*\* Helm 12 — Helmet • Epic • Lvl 120$/m);
     } finally { globalThis.fetch = realFetch; }
     assert.deepEqual(fetches, []);
 });

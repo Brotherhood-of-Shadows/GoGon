@@ -4,7 +4,7 @@
 spec:
   id: "discord-integration-v1"
   status: draft
-  version: "1.8.0"
+  version: "1.9.0"
   created: "2026-09-22"
   updated: "2026-11-04"
 
@@ -13,6 +13,10 @@ spec:
     depends_on: ["business-domain", "security"]
 
   changelog:
+    - version: "1.9.0"
+      date: "2026-11-04"
+      changes:
+        - "/guide browse (specs/tasks/2026-11-guide-browse.md), owner decisions 2026-11-04: a browse subcommand group beside the six look-up subcommands lists catalog entries 10 per page. Filters: item rarity/type/min-max level; creature class/min-max level; realm master realm/min-max level; master realm min-max level; relic realm; quest realm/min-max level. Text filters autocomplete stored values; realm filters autocomplete entries. Fixed level-ascending order (unlevelled last, then name; relics by realm then name). ◀ ▶ edit the requester's private list; a select (guide:bo) opens an entry as a new private card; Share posts the page publicly with working paging and select, which answer other members privately. List state is stateless in custom_ids (guide:b|bs:<kind code>:<page>:<filters>, at most 100 characters). Reuses the early acknowledgement and [guide] timing WARN; ERR logs carry operation and kind only (RULE-002). AC-DISC-001 registers the group; AC-DISC-008 added. Reader: catalogReader browse/filterValues/resolveFilterValue over migration 023's indexed virtual stat columns."
     - version: "1.8.0"
       date: "2026-11-04"
       changes:
@@ -86,8 +90,9 @@ domain:
     scenarios:
     - given: Valid GG_DISCORD_TOKEN, GG_DISCORD_APP_ID, and GG_DISCORD_GUILD_ID in .env
       when: setupDiscord() is called during startup
-      then: Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, /guide, and /about with Discord REST API and binds
-        interaction event listeners, including /guide autocomplete and guide components
+      then: Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, /guide (including the browse subcommand group), and
+        /about with Discord REST API and binds interaction event listeners, including /guide autocomplete and guide
+        components
     - given: Discord credentials missing from .env
       when: setupDiscord() is evaluated in app.mjs
       then: Logs warning and skips bot initialization without preventing scraper engine execution
@@ -164,6 +169,23 @@ domain:
       when: Any /guide interaction runs
       then: Replies ephemerally that guide data is unavailable and logs one ERR with operation and kind only; no
         request reaches the game or guide.fallensword.com
+  - id: AC-DISC-008
+    statement: Filtered, paged catalog lists with /guide browse (specs/tasks/2026-11-guide-browse.md)
+    scenarios:
+    - given: A member types in a /guide browse text or realm filter
+      when: Discord requests autocomplete
+      then: Responds with at most 25 stored values (rarity, type, class) or catalog entries (realm, master realm); a
+        failure or the 2.5 s deadline yields no choices and one WARN naming kind and option, without the typed text
+    - given: A member runs /guide browse <kind> with filters
+      when: The command runs
+      then: Resolves typed values to their stored spelling or entry, then replies ephemerally with page 1 of at most 10
+        entries in level-ascending order with filters, hints, an Incomplete marker, page and match counts; an unknown
+        value or realm is reported instead of an empty list
+    - given: A member uses ◀ ▶, the entry select or Share on a list, possibly after a restart
+      when: The component interaction arrives
+      then: On the requester's private list paging updates that message; the select opens a new private card; Share
+        posts the page publicly with paging and select but no Share button and no mentions; on a shared post paging
+        replies with a private list and the post never changes; malformed list state expires without a catalog read
   dependencies:
   - domain_ref: specs/auth-session.spec.yaml
     relationship: Slash commands invoke getBuffs and API calls through session layer.
@@ -237,7 +259,7 @@ acceptance_criteria:
     description: "Slash command registration and command routing"
     given: "Valid GG_DISCORD_TOKEN, GG_DISCORD_APP_ID, and GG_DISCORD_GUILD_ID in .env"
     when: "setupDiscord() is called during startup"
-    then: "Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, /guide, and /about with Discord REST API and binds interaction event listeners, including /guide autocomplete and guide components"
+    then: "Registers /buff, /bebuff, /checkbuffs, /gvgcooldown, /guide (including the browse subcommand group), and /about with Discord REST API and binds interaction event listeners, including /guide autocomplete and guide components"
     error_cases:
       - given: "Discord credentials missing from .env"
         when: "setupDiscord() is evaluated in app.mjs"

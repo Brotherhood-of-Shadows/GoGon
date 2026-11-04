@@ -4,15 +4,19 @@
 spec:
   id: "catalog-sync-v1"
   status: locked
-  version: "1.9.2"
+  version: "1.9.3"
   created: "2026-09-25"
-  updated: "2026-11-03"
+  updated: "2026-11-04"
 
   version_policy:
     sync_group: "business-domain"
     depends_on: ["data-model", "api-surface", "security"]
 
   changelog:
+    - version: "1.9.3"
+      date: "2026-11-04"
+      changes:
+        - "Migration 023 (specs/tasks/2026-11-guide-browse.md) adds read-only VIRTUAL columns items.stat_type/stat_level and creatures.stat_class/stat_level derived from the stats JSON, with indexes (also items.rarity) for /guide browse. Each expression is NULL unless stats is valid JSON and the value has the expected JSON type, so no stored or future row can make a write fail. Writers never name these columns; serving data and provenance are unchanged."
     - version: "1.9.2"
       date: "2026-11-03"
       changes:
