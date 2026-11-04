@@ -4,15 +4,19 @@
 spec:
   id: "data-storage-v1"
   status: locked
-  version: "2.3.0"
+  version: "2.3.1"
   created: "2026-09-22"
-  updated: "2026-10-13"
+  updated: "2026-11-04"
 
   version_policy:
     sync_group: "data-model"
     depends_on: []
 
   changelog:
+    - version: "2.3.1"
+      date: "2026-11-04"
+      changes:
+        - "Test harness only (owner request 2026-11-04): on real MySQL the migrations run once per test run into a template database gg_tpl_<hash of _gg_data/migrations>, built by the first test process under GET_LOCK and kept while the migrations are unchanged (tests/helpers/mysql-template.mjs). Each process database and each new freshClient() database is cloned from it; a freshClient() database whose test has ended is reset (rows deleted, seed rows restored, moved AUTO_INCREMENT counters put back) and reused unless the test changed its schema (column/index/constraint fingerprint). Clients created during a test are closed when it ends. migrate: false still yields an empty database. Local real-MySQL CI job: 926 s to 172 s; the health probe no longer times out while every process migrates at once. Application code and migrations are unchanged."
     - version: "2.3.0"
       date: "2026-10-13"
       changes:
@@ -158,7 +162,8 @@ domain:
       when: Tests import the data layer
       then: mysql2/promise is replaced by an in-process fake (a fresh, empty database per test process) that runs
         the same SQL; with GG_TEST_MYSQL_URL set, the fake is not installed and each test process uses its own throwaway
-        database on that server, dropped at exit
+        database on that server, cloned from the run's migrated template and dropped at exit; freshClient() databases
+        are reset and reused once their test ends unless the test changed their schema
     - given: A statement uses MySQL syntax the fake does not translate
       when: The fake executes it
       then: Throws an error naming the statement, so the gap is fixed in the fake rather than silently ignored
@@ -335,7 +340,7 @@ acceptance_criteria:
     description: "Test fake and real-MySQL parity"
     given: "The npm test preload"
     when: "Tests import the data layer"
-    then: "mysql2/promise is replaced by an in-process fake (a fresh, empty database per test process) that runs the same SQL; with GG_TEST_MYSQL_URL set, the fake is not installed and each test process uses its own throwaway database on that server, dropped at exit"
+    then: "mysql2/promise is replaced by an in-process fake (a fresh, empty database per test process) that runs the same SQL; with GG_TEST_MYSQL_URL set, the fake is not installed and each test process uses its own throwaway database on that server, cloned from the run's migrated template and dropped at exit; freshClient() databases are reset and reused once their test ends unless the test changed their schema"
     error_cases:
       - given: "A statement uses MySQL syntax the fake does not translate"
         when: "The fake executes it"

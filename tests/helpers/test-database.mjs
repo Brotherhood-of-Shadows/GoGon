@@ -3,7 +3,8 @@
 //   - default: mysql2/promise is mocked with the in-process fake (tests/helpers/fake-mysql.mjs);
 //     each test process starts with an empty database.
 //   - GG_TEST_MYSQL_URL=mysql://user:pass@127.0.0.1:3306 (CI): a real MySQL. Each test process
-//     gets its own throwaway database, dropped when the process ends.
+//     gets its own throwaway database, cloned from the run's migrated template and dropped when the
+//     process ends. The template (gg_tpl_<migrations hash>) is kept for the next run.
 // Requires --experimental-test-module-mocks (set in the npm test script).
 import { mock } from 'node:test';
 import crypto from 'node:crypto';
@@ -36,6 +37,11 @@ if (realUrl) {
     const conn = await admin();
     await conn.query(`CREATE DATABASE \`${database}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`);
     await conn.end();
+    // The process database starts as a copy of the run's migrated template (mysql-template.mjs), so
+    // gg_database's startup migration check finds nothing pending instead of every process running
+    // all migrations at once.
+    const { cloneTemplate } = await import('./mysql-template.mjs');
+    await cloneTemplate(database);
     globalThis.__GG_TEST_DATABASES__ ??= [];
     let dropped = false;
     process.on('beforeExit', async () => {
